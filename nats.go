@@ -1308,6 +1308,13 @@ func (nc *Conn) SubscribeSync(subj string) (*Subscription, error) {
 	return nc.subscribe(subj, _EMPTY_, nil, nc.Opts.SubChanLen)
 }
 
+// SubscribeGo works like Subscribe but will execute each msg handler
+// in its own Goroutine.
+func (nc *Conn) SubscribeGo(subj string, cb MsgHandler) (*Subscription, error) {
+	goCb := func(msg *Msg) { go cb(msg) }
+	return nc.subscribe(subj, _EMPTY_, goCb, nc.Opts.SubChanLen)
+}
+
 // QueueSubscribe creates an asynchronous queue subscriber on the given subject.
 // All subscribers with the same queue name will form the queue group and
 // only one member of the group will be selected to receive any given
@@ -1322,6 +1329,13 @@ func (nc *Conn) QueueSubscribe(subj, queue string, cb MsgHandler) (*Subscription
 // given message synchronously.
 func (nc *Conn) QueueSubscribeSync(subj, queue string) (*Subscription, error) {
 	return nc.subscribe(subj, queue, nil, nc.Opts.SubChanLen)
+}
+
+// QueueSubscribeGo works like QueueSubscribe but will execute each msg handler
+// in its own Goroutine.
+func (nc *Conn) QueueSubscribeGo(subj, queue string, cb MsgHandler) (*Subscription, error) {
+	goCb := func(msg *Msg) { go cb(msg) }
+	return nc.subscribe(subj, queue, goCb, nc.Opts.SubChanLen)
 }
 
 // unsubscribe performs the low level unsubscribe to the server.
