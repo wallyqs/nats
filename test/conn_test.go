@@ -1216,3 +1216,54 @@ func TestUseDefaultTimeout(t *testing.T) {
 		t.Fatalf("Expected Timeout to be set to %v, got %v", nats.DefaultTimeout, nc.Opts.Timeout)
 	}
 }
+
+func TestNatsTimeoutError(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+	_, err = nc.Request("foo", []byte("help"), 10*time.Millisecond)
+	if err == nil {
+		t.Fatalf("Request on expected to fail since no subscribers: %v\n", err)
+	}
+
+	type natsTimeoutError interface {
+		Error() string
+		Temporary() bool
+		Timeout() bool
+	}
+
+	errTimeout, ok := err.(natsTimeoutError)
+	if !ok {
+		t.Errorf("Expected to have a nats timeout, got: %s", err)
+	}
+
+	if errTimeout.Error() != "nats: timeout" {
+		t.Errorf("Expected a nats timeout, got: %s", errTimeout.Error())
+	}
+
+	if errTimeout.Temporary() != true {
+		t.Errorf("Expected a error to be temporary, got: %s", errTimeout.Temporary())
+	}
+
+	if errTimeout.Timeout() != true {
+		t.Errorf("Expected a error to be temporary, got: %s", errTimeout.Temporary())
+	}
+
+	// Check with connection closed which yields a different error
+	nc.Close()
+
+	_, err = nc.Request("foo", []byte("help"), 10*time.Millisecond)
+	if err == nil {
+		t.Fatalf("Request on expected to fail since no subscribers available: %v\n", err)
+	}
+	if _, ok := err.(natsTimeoutError); ok {
+		t.Fatalf("Expected to not have a timeout error, got: %v", err)
+	}
+	if err != nats.ErrConnectionClosed {
+		t.Fatalf("Expected to have a connection closed error")
+	}
+}

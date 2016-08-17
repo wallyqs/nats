@@ -49,6 +49,12 @@ const STALE_CONNECTION = "stale connection"
 const PERMISSIONS_ERR = "permissions violation"
 
 // Errors
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "nats: timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
 var (
 	ErrConnectionClosed     = errors.New("nats: connection closed")
 	ErrSecureConnRequired   = errors.New("nats: secure connection required")
@@ -57,7 +63,7 @@ var (
 	ErrTypeSubscription     = errors.New("nats: invalid subscription type")
 	ErrBadSubject           = errors.New("nats: invalid subject")
 	ErrSlowConsumer         = errors.New("nats: slow consumer, messages dropped")
-	ErrTimeout              = errors.New("nats: timeout")
+	ErrTimeout              = &timeoutError{}
 	ErrBadTimeout           = errors.New("nats: timeout invalid")
 	ErrAuthorization        = errors.New("nats: authorization violation")
 	ErrNoServers            = errors.New("nats: no servers available for connection")
