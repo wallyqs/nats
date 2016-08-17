@@ -48,21 +48,75 @@ const STALE_CONNECTION = "stale connection"
 // PERMISSIONS_ERR is for when nats server subject authorization has failed.
 const PERMISSIONS_ERR = "permissions violation"
 
-// Errors
+// Error represents a nats error.
+type Error interface {
+	error
+
+	// NatsTimeout is set whenever a nats request or flush timeout action
+	// extends over the given deadline.
+	NatsTimeout() bool
+
+	// SlowConsumer is set whenever the client is unable to process messages
+	// reliably any more possibly ousting the server pending size for client.
+	SlowConsumer() bool
+
+	// ProtocolError is set to true whenever the server has sent
+	// an ERR protocol line to the client.
+	ProtocolError() bool
+}
+
+// timeoutError implements both net.Error and nats.Error interfaces
+// and it represents an error which could be retried as it is temporary.
 type timeoutError struct{}
 
 func (e *timeoutError) Error() string   { return "nats: timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
 
+func (e *timeoutError) NatsTimeout() bool   { return true }
+func (e *timeoutError) SlowConsumer() bool  { return false }
+func (e *timeoutError) ProtocolError() bool { return false }
+
+// connectionClosedError implements both net.Error and nats.Error interfaces
+// and it represents a hard error as the client is no longer connected.
+type connectionClosedError struct{}
+
+func (e *connectionClosedError) Error() string   { return "nats: connection closed" }
+func (e *connectionClosedError) Timeout() bool   { return false }
+func (e *connectionClosedError) Temporary() bool { return false }
+
+func (e *connectionClosedError) NatsTimeout() bool   { return false }
+func (e *connectionClosedError) SlowConsumer() bool  { return false }
+func (e *connectionClosedError) ProtocolError() bool { return false }
+
+// serverProtocolError represents an ERR protocol line which was
+// sent by the server.
+type serverProtocolError struct {
+	msg string
+}
+
+func (e *serverProtocolError) Error() string       { return "nats: " + e.msg }
+func (e *serverProtocolError) NatsTimeout() bool   { return false }
+func (e *serverProtocolError) SlowConsumer() bool  { return false }
+func (e *serverProtocolError) ProtocolError() bool { return true }
+
+// slowConsumerError signals that the client has reached a state
+// where it cannot process messages any further.
+type slowConsumerError struct{}
+
+func (e *slowConsumerError) Error() string       { return "nats: slow consumer, messages dropped" }
+func (e *slowConsumerError) NatsTimeout() bool   { return false }
+func (e *slowConsumerError) SlowConsumer() bool  { return true }
+func (e *slowConsumerError) ProtocolError() bool { return false }
+
 var (
-	ErrConnectionClosed     = errors.New("nats: connection closed")
+	ErrConnectionClosed     = &connectionClosedError{}
 	ErrSecureConnRequired   = errors.New("nats: secure connection required")
 	ErrSecureConnWanted     = errors.New("nats: secure connection not available")
 	ErrBadSubscription      = errors.New("nats: invalid subscription")
 	ErrTypeSubscription     = errors.New("nats: invalid subscription type")
 	ErrBadSubject           = errors.New("nats: invalid subject")
-	ErrSlowConsumer         = errors.New("nats: slow consumer, messages dropped")
+	ErrSlowConsumer         = &slowConsumerError{}
 	ErrTimeout              = &timeoutError{}
 	ErrBadTimeout           = errors.New("nats: timeout invalid")
 	ErrAuthorization        = errors.New("nats: authorization violation")
@@ -1541,7 +1595,7 @@ func (nc *Conn) processSlowConsumer(s *Subscription) {
 // processPermissionsViolation is called when the server signals a subject
 // permissions violation on either publish or subscribe.
 func (nc *Conn) processPermissionsViolation(err string) {
-	nc.err = errors.New("nats: " + err)
+	nc.err = &serverProtocolError{msg: err}
 	if nc.Opts.AsyncErrorCB != nil {
 		nc.ach <- func() { nc.Opts.AsyncErrorCB(nc, nil, nc.err) }
 	}
@@ -1673,7 +1727,7 @@ func (nc *Conn) processErr(e string) {
 		nc.processPermissionsViolation(e)
 	} else {
 		nc.mu.Lock()
-		nc.err = errors.New("nats: " + e)
+		nc.err = &serverProtocolError{msg: e}
 		nc.mu.Unlock()
 		nc.Close()
 	}
