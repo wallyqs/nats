@@ -15,9 +15,10 @@ import (
 	"time"
 
 	"encoding/json"
+	"runtime"
+
 	"github.com/nats-io/gnatsd/server"
 	gnatsd "github.com/nats-io/gnatsd/test"
-	"runtime"
 )
 
 // Dumb wait program to sync on callbacks, etc... Will timeout
@@ -1074,7 +1075,7 @@ func TestConnServers(t *testing.T) {
 
 	// check the default url
 	validateURLs(c.Servers(), "nats://localhost:4222")
-	if len(c.ImplicitServers()) != 0 {
+	if len(c.DiscoveredServers()) != 0 {
 		t.Fatalf("Expected no implicit servers")
 	}
 
@@ -1085,8 +1086,8 @@ func TestConnServers(t *testing.T) {
 	}
 	// Server list should now contain both the default and the new url.
 	validateURLs(c.Servers(), "nats://localhost:4222", "nats://localhost:5222")
-	// Implicit servers should only contain the new url.
-	validateURLs(c.ImplicitServers(), "nats://localhost:5222")
+	// Discovered servers should only contain the new url.
+	validateURLs(c.DiscoveredServers(), "nats://localhost:5222")
 
 	// verify user credentials are stripped out.
 	opts.Servers = []string{"nats://user:pass@localhost:4333", "nats://token@localhost:4444"}
