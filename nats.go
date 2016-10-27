@@ -1513,9 +1513,13 @@ func (nc *Conn) processMsg(data []byte) {
 	// We have two modes of delivery. One is the channel, used by channel
 	// subscribers and syncSubscribers, the other is a linked list for async.
 	if sub.mch != nil {
+		// Try to send message to the subscription channel otherwise
+		// drop the message in case the consumer is not processing
+		// them fast enough with a timeout analogous to the slow consumer
+		// flushing deadline from the server.
 		select {
 		case sub.mch <- m:
-		default:
+		case <-time.After(2 * time.Second):
 			goto slowConsumer
 		}
 	} else {
