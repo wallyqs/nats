@@ -498,6 +498,182 @@ func TestSlowAsyncSubscriber(t *testing.T) {
 	bch <- true
 }
 
+func TestSlowConsumerTimeoutUnbufferedChanSubscriber(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	var dropped int
+	nc := NewDefaultConnection(t)
+	nc.SetErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
+		// Capture number of dropped messages
+		dropped, _ = sub.Dropped()
+	})
+	defer nc.Close()
+
+	// Create our own channel with a buffer smaller
+	// than the message burst that we will be receiving.
+	ch1 := make(chan *nats.Msg)
+	doneCh := make(chan struct{})
+	sub, err := nc.ChanSubscribe("foo", ch1)
+	if err != nil {
+		t.Fatalf("Error subscribing using a channel: %s", err)
+	}
+	sub.SetSlowConsumerTimeout(2 * time.Second)
+
+	// Send messages with a larger burst than what the
+	// channel buffer supports.
+	total := 2048
+	var received int
+	go func() {
+		for range ch1 {
+			received += 1
+			if received >= total {
+				doneCh <- struct{}{}
+			}
+		}
+	}()
+	for i := 0; i < total; i++ {
+		nc.Publish("foo", []byte("Hello"))
+	}
+
+	tm := time.NewTimer(5 * time.Second)
+	defer tm.Stop()
+
+Wait:
+	// Go ahead and receive
+	for {
+		select {
+		case <-doneCh:
+			break Wait
+		case <-tm.C:
+			t.Fatalf("Timed out waiting for all messages. Dropped: %d - Received: %d", dropped, received)
+		}
+	}
+
+	if dropped > 0 {
+		t.Fatalf("Expected no messages to have been dropped. Got: %d", dropped)
+	}
+}
+
+func TestSlowConsumerTimeoutBufferedChanSubscriber(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	var dropped int
+	nc := NewDefaultConnection(t)
+	nc.SetErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
+		// Capture number of dropped messages
+		dropped, _ = sub.Dropped()
+	})
+	defer nc.Close()
+
+	// Create our own channel with a buffer smaller
+	// than the message burst that we will be receiving.
+	ch1 := make(chan *nats.Msg, 8)
+	doneCh := make(chan struct{})
+	sub, err := nc.ChanSubscribe("foo", ch1)
+	if err != nil {
+		t.Fatalf("Error creating chan subscription: %s", err)
+	}
+	sub.SetSlowConsumerTimeout(2 * time.Second)
+
+	// Send messages with a larger burst than what the
+	// channel buffer supports.
+	total := 2048
+	var received int
+	go func() {
+		for range ch1 {
+			received += 1
+			if received >= total {
+				doneCh <- struct{}{}
+			}
+		}
+	}()
+	for i := 0; i < total; i++ {
+		nc.Publish("foo", []byte("Hello"))
+	}
+
+	tm := time.NewTimer(5 * time.Second)
+	defer tm.Stop()
+
+	// Go ahead and receive
+Wait:
+	for {
+		select {
+		case <-doneCh:
+			break Wait
+		case <-tm.C:
+			t.Fatalf("Timed out waiting for all messages. Dropped: %d - Received: %d", dropped, received)
+		}
+	}
+
+	if dropped > 0 {
+		t.Fatalf("Expected no messages to have been dropped. Got: %d", dropped)
+	}
+}
+
+func TestSlowChanSubscriberBuffered(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	var dropped int
+	nc := NewDefaultConnection(t)
+	nc.SetErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
+		// Capture number of dropped messages
+		dropped, _ = sub.Dropped()
+	})
+	defer nc.Close()
+
+	// Create our own channel with a buffer smaller
+	// than the message burst that we will be receiving.
+	ch1 := make(chan *nats.Msg, 64)
+	doneCh := make(chan struct{})
+	sub, err := nc.ChanSubscribe("foo", ch1)
+	if err != nil {
+		t.Fatalf("Error creating chan subscription: %s", err)
+	}
+	sub.SetSlowConsumerTimeout(2 * time.Second)
+
+	// Send messages with a larger burst than what the
+	// channel buffer supports.
+	total := 1024
+	received := 0
+	go func() {
+		for range ch1 {
+			received += 1
+
+			// Block consuming from channel causing
+			// client to drop messages
+			if received == 200 {
+				time.Sleep(3 * time.Second)
+			}
+			if received == 1023 {
+				doneCh <- struct{}{}
+			}
+		}
+	}()
+	for i := 0; i < total; i++ {
+		nc.Publish("foo", []byte("Hello"))
+	}
+	nc.Flush()
+
+	// Wait for all messages to have been delivered
+	// and slow consumer staged reached.
+Wait:
+	for {
+		select {
+		case <-doneCh:
+			break Wait
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Timed out waiting for all messages. Dropped: %d - Received: %d", dropped, received)
+		}
+	}
+
+	if dropped != 1 {
+		t.Fatalf("Expected messages to have been dropped. Got: %d", dropped)
+	}
+}
+
 func TestAsyncErrHandler(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
