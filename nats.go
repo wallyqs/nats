@@ -1512,6 +1512,9 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 		// Deliver the message.
 		if m != nil && (max == 0 || delivered <= max) {
 			mcb(m)
+
+			// Put back into the sync.Pool after Msg has been processed by callback
+			msgPool.Put(m)
 		}
 		// If we have hit the max for delivered msgs, remove sub.
 		if max > 0 && delivered >= max {
@@ -1521,6 +1524,14 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 			break
 		}
 	}
+}
+
+// msgPool to reuse Msg containers used to dispatch messages
+// into the callbacks/channels from clients.
+var msgPool = sync.Pool{
+	New: func() interface{} {
+		return new(Msg)
+	},
 }
 
 // processMsg is called by parse and will place the msg on the
@@ -1552,8 +1563,12 @@ func (nc *Conn) processMsg(data []byte) {
 	msgPayload := make([]byte, len(data))
 	copy(msgPayload, data)
 
-	// FIXME(dlc): Should we recycle these containers?
-	m := &Msg{Data: msgPayload, Subject: subj, Reply: reply, Sub: sub}
+	// Use pool to recycle these containers
+	m := msgPool.Get().(*Msg)
+	m.Data = msgPayload
+	m.Subject = subj
+	m.Reply = reply
+	m.Sub = sub
 
 	sub.mu.Lock()
 
@@ -1578,6 +1593,8 @@ func (nc *Conn) processMsg(data []byte) {
 	// We have two modes of delivery. One is the channel, used by channel
 	// subscribers and syncSubscribers, the other is a linked list for async.
 	if sub.mch != nil {
+		defer msgPool.Put(m)
+
 		select {
 		case sub.mch <- m:
 		default:
