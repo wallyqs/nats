@@ -2174,7 +2174,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	}
 
 	s.mu.Lock()
-	err := s.validateNextMsgCall()
+	err := s.validateNextMsgState()
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -2206,10 +2206,10 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	return msg, nil
 }
 
-// validateNextMsgCall checks whether the subscription is in a valid
-// state to process a next message.  This should be called while holding
-// the lock.
-func (s *Subscription) validateNextMsgCall() error {
+// validateNextMsgState checks whether the subscription is in a valid
+// state to call NextMsg and be delivered another message synchronously.
+// This should be called while holding the lock.
+func (s *Subscription) validateNextMsgState() error {
 	if s.connClosed {
 		return ErrConnectionClosed
 	}

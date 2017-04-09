@@ -46,7 +46,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	}
 
 	s.mu.Lock()
-	err := s.validateNextMsgCall()
+	err := s.validateNextMsgState()
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
