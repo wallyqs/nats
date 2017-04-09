@@ -7,25 +7,19 @@ package nats
 
 import "context"
 
-// RequestWithContext takes a context, a subject and payload in bytes
-// and request expecting a single response.
-func (nc *Conn) RequestWithContext(
-	ctx context.Context,
-	subj string,
-	data []byte,
-) (*Msg, error) {
+// RequestWithContext takes a context, a subject and payload
+// in bytes and request expecting a single response.
+func (nc *Conn) RequestWithContext(ctx context.Context, subj string, data []byte) (*Msg, error) {
+	if ctx == nil {
+		panic("nil context")
+	}
 	inbox := NewInbox()
 	ch := make(chan *Msg, RequestChanLen)
-	recvCh := make(chan *Msg, 1)
-	var recvMsg *Msg
 
-	s, err := nc.subscribe(inbox, _EMPTY_, func(msg *Msg) {
-		recvCh <- msg
-	}, ch)
-
+	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch)
 	if err != nil {
-		// If we errored here but context has been canceled
-		// then still return the error from context.
+		// If we errored here but context has been canceled already
+		// then return the error from the context instead.
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -36,11 +30,10 @@ func (nc *Conn) RequestWithContext(
 	}
 	s.AutoUnsubscribe(1)
 	defer s.Unsubscribe()
-	defer close(ch)
 
 	err = nc.PublishRequest(subj, inbox, data)
 	if err != nil {
-		// Still prefer error from context
+		// Use error from context instead if already canceled.
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -50,14 +43,7 @@ func (nc *Conn) RequestWithContext(
 		return nil, err
 	}
 
-	select {
-	case <-ctx.Done():
-		// Context has been canceled so return opaque error
-		return nil, ctx.Err()
-	case recvMsg = <-recvCh:
-		break
-	}
-	return recvMsg, nil
+	return s.NextMsgWithContext(ctx)
 }
 
 // NextMsgWithContext takes a context and returns the next message available
@@ -71,6 +57,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 		return nil, ErrBadSubscription
 	}
 
+	// Add validateNextMsgState func and reuse
 	s.mu.Lock()
 	if s.connClosed {
 		s.mu.Unlock()
