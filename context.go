@@ -49,9 +49,9 @@ func (nc *Conn) RequestWithContext(ctx context.Context, subj string, data []byte
 	return s.NextMsgWithContext(ctx)
 }
 
-// NextMsgWithContext takes a context and returns the next message available
-// to a synchronous subscriber, blocking until either one is available or
-// context gets canceled.
+// NextMsgWithContext takes a context and returns the next message
+// available to a synchronous subscriber, blocking until either one
+// is available or context gets canceled.
 func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	if ctx == nil {
 		panic("nil context")
@@ -60,29 +60,13 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 		return nil, ErrBadSubscription
 	}
 
-	// Add validateNextMsgState func and reuse
+	// Check whether subscription is in a valid state
+	// to process a next message.
 	s.mu.Lock()
-	if s.connClosed {
+	err := s.validateNextMsgCall()
+	if err != nil {
 		s.mu.Unlock()
-		return nil, ErrConnectionClosed
-	}
-	if s.mch == nil {
-		if s.max > 0 && s.delivered >= s.max {
-			s.mu.Unlock()
-			return nil, ErrMaxMessages
-		} else if s.closed {
-			s.mu.Unlock()
-			return nil, ErrBadSubscription
-		}
-	}
-	if s.mcb != nil {
-		s.mu.Unlock()
-		return nil, ErrSyncSubRequired
-	}
-	if s.sc {
-		s.sc = false
-		s.mu.Unlock()
-		return nil, ErrSlowConsumer
+		return nil, err
 	}
 
 	// snapshot
@@ -99,6 +83,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 		if !ok {
 			return nil, ErrConnectionClosed
 		}
+
 		// Update some stats.
 		s.mu.Lock()
 		s.delivered++

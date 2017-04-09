@@ -2165,6 +2165,31 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int) error {
 	return nil
 }
 
+// validateNextMsgCall checks whether the subscription is in a valid
+// state to process a next message.  This should be called while holding
+// the lock.
+func (s *Subscription) validateNextMsgCall() error {
+	if s.connClosed {
+		return ErrConnectionClosed
+	}
+	if s.mch == nil {
+		if s.max > 0 && s.delivered >= s.max {
+			return ErrMaxMessages
+		} else if s.closed {
+			return ErrBadSubscription
+		}
+	}
+	if s.mcb != nil {
+		return ErrSyncSubRequired
+	}
+	if s.sc {
+		s.sc = false
+		return ErrSlowConsumer
+	}
+
+	return nil
+}
+
 // NextMsg() will return the next message available to a synchronous subscriber
 // or block until one is available. A timeout can be used to return when no
 // message has been delivered.
@@ -2172,28 +2197,12 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	if s == nil {
 		return nil, ErrBadSubscription
 	}
+
 	s.mu.Lock()
-	if s.connClosed {
+	err := s.validateNextMsgCall()
+	if err != nil {
 		s.mu.Unlock()
-		return nil, ErrConnectionClosed
-	}
-	if s.mch == nil {
-		if s.max > 0 && s.delivered >= s.max {
-			s.mu.Unlock()
-			return nil, ErrMaxMessages
-		} else if s.closed {
-			s.mu.Unlock()
-			return nil, ErrBadSubscription
-		}
-	}
-	if s.mcb != nil {
-		s.mu.Unlock()
-		return nil, ErrSyncSubRequired
-	}
-	if s.sc {
-		s.sc = false
-		s.mu.Unlock()
-		return nil, ErrSlowConsumer
+		return nil, err
 	}
 
 	// snapshot
