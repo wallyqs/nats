@@ -306,9 +306,6 @@ type Subscription struct {
 	pMsgsLimit  int
 	pBytesLimit int
 	dropped     int
-
-	// context used along with the subscription.
-	ctx cntxt
 }
 
 // Msg is a structure used by Subscribers and PublishMsg().
@@ -2168,12 +2165,6 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int) error {
 	return nil
 }
 
-// cntxt implements part of the Context interface for pre-go1.7 clients support.
-type cntxt interface {
-	Done() <-chan struct{}
-	Err() error
-}
-
 // NextMsg() will return the next message available to a synchronous subscriber
 // or block until one is available. A timeout can be used to return when no
 // message has been delivered.
@@ -2211,8 +2202,17 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	max := s.max
 	s.mu.Unlock()
 
+	var ok bool
 	var msg *Msg
-	processMsg := func(msg *Msg) error {
+
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+
+	select {
+	case msg, ok = <-mch:
+		if !ok {
+			return nil, ErrConnectionClosed
+		}
 		// Update some stats.
 		s.mu.Lock()
 		s.delivered++
@@ -2225,7 +2225,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 
 		if max > 0 {
 			if delivered > max {
-				return ErrMaxMessages
+				return nil, ErrMaxMessages
 			}
 			// Remove subscription if we have reached max.
 			if delivered == max {
@@ -2235,41 +2235,6 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 			}
 		}
 
-		return nil
-	}
-
-	// Check if have context that we can use for cancellation.
-	if s.ctx != nil {
-		select {
-		case m, ok := <-mch:
-			if !ok {
-				return nil, ErrConnectionClosed
-			}
-			err := processMsg(m)
-			if err != nil {
-				return nil, err
-			}
-			msg = m
-		case <-s.ctx.Done():
-			return nil, s.ctx.Err()
-		}
-
-		return msg, nil
-	}
-
-	t := time.NewTimer(timeout)
-	defer t.Stop()
-
-	select {
-	case m, ok := <-mch:
-		if !ok {
-			return nil, ErrConnectionClosed
-		}
-		err := processMsg(m)
-		if err != nil {
-			return nil, err
-		}
-		msg = m
 	case <-t.C:
 		return nil, ErrTimeout
 	}
