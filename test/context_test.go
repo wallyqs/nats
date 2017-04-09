@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/go-nats"
 )
 
-func TestRequestWithTimeoutContext(t *testing.T) {
+func TestContextRequestWithTimeout(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
 
@@ -71,7 +71,7 @@ func TestRequestWithTimeoutContext(t *testing.T) {
 	}
 }
 
-func TestRequestWithTimeoutContextCancelled(t *testing.T) {
+func TestContextRequestWithTimeoutCancelled(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
 
@@ -124,7 +124,7 @@ func TestRequestWithTimeoutContextCancelled(t *testing.T) {
 	}
 }
 
-func TestRequestWithCancelContext(t *testing.T) {
+func TestContextRequestWithCancel(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
 
@@ -201,7 +201,7 @@ func TestRequestWithCancelContext(t *testing.T) {
 	}
 }
 
-func TestRequestWithDeadlineContext(t *testing.T) {
+func TestContextRequestWithDeadline(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
 
@@ -252,7 +252,7 @@ func TestRequestWithDeadlineContext(t *testing.T) {
 	}
 }
 
-func TestSubNextMsgWithDeadlineContext(t *testing.T) {
+func TestContextSubNextMsgWithDeadline(t *testing.T) {
 	s := RunDefaultServer()
 	defer s.Shutdown()
 
