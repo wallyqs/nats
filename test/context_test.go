@@ -307,3 +307,74 @@ func TestContextSubNextMsgWithDeadline(t *testing.T) {
 		t.Errorf("Expected %q error, got: %q", expected, err.Error())
 	}
 }
+
+func TestContextEncodedRequestWithDeadline(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	nc := NewDefaultConnection(t)
+	c, err := nats.NewEncodedConn(nc, nats.JSON_ENCODER)
+	if err != nil {
+		t.Fatalf("Unable to create encoded connection: %v", err)
+	}
+	defer c.Close()
+
+	deadline := time.Now().Add(100 * time.Millisecond)
+	ctx, cancelCB := context.WithDeadline(context.Background(), deadline)
+	defer cancelCB() // should always be called, not discarded, to prevent context leak
+
+	type request struct {
+		Message string `json:"message"`
+	}
+	type response struct {
+		Code int `json:"code"`
+	}
+	c.Subscribe("slow", func(_, reply string, req *request) {
+		got := req.Message
+		expected := "Hello"
+		if got != expected {
+			t.Errorf("Expected to receive request with %q, got %q", got, expected)
+		}
+
+		// simulates latency into the client so that timeout is hit.
+		time.Sleep(40 * time.Millisecond)
+		c.Publish(reply, &response{Code: 200})
+	})
+
+	for i := 0; i < 2; i++ {
+		req := &request{Message: "Hello"}
+		resp := &response{}
+		err := c.RequestWithContext(ctx, "slow", req, resp)
+		if err != nil {
+			t.Fatalf("Expected encoded request with context to not fail: %s", err)
+		}
+		got := resp.Code
+		expected := 200
+		if got != expected {
+			t.Errorf("Expected to receive %v, got: %v", expected, got)
+		}
+	}
+
+	// A third request with latency would make the context
+	// reach the deadline.
+	req := &request{Message: "Hello"}
+	resp := &response{}
+	err = c.RequestWithContext(ctx, "slow", req, resp)
+	if err == nil {
+		t.Fatalf("Expected request with context to reach deadline: %s", err)
+	}
+
+	// Reported error is "context deadline exceeded" from Context package,
+	// which implements net.Error Timeout interface.
+	type timeoutError interface {
+		Timeout() bool
+	}
+	timeoutErr, ok := err.(timeoutError)
+	if !ok || !timeoutErr.Timeout() {
+		t.Errorf("Expected to have a timeout error")
+	}
+	expected := `context deadline exceeded`
+	if !strings.Contains(err.Error(), expected) {
+		t.Errorf("Expected %q error, got: %q", expected, err.Error())
+	}
+}

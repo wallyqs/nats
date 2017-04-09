@@ -5,7 +5,10 @@
 // A Go client for the NATS messaging system (https://nats.io).
 package nats
 
-import "context"
+import (
+	"context"
+	"reflect"
+)
 
 // RequestWithContext takes a context, a subject and payload
 // in bytes and request expecting a single response.
@@ -122,4 +125,51 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	}
 
 	return msg, nil
+}
+
+// RequestWithContext will create an Inbox and perform a Request
+// using the provided cancellation context with the Inbox reply
+// for the data v. A response will be decoded into the vPtrResponse.
+func (c *EncodedConn) RequestWithContext(
+	ctx context.Context,
+	subject string,
+	v interface{},
+	vPtr interface{},
+) error {
+	if ctx == nil {
+		panic("nil context")
+	}
+	b, err := c.Enc.Encode(subject, v)
+	if err != nil {
+		// Use error from context instead if already canceled.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		return err
+	}
+	m, err := c.Conn.RequestWithContext(ctx, subject, b)
+	if err != nil {
+		return err
+	}
+	if reflect.TypeOf(vPtr) == emptyMsgType {
+		mPtr := vPtr.(*Msg)
+		*mPtr = *m
+	} else {
+		err = c.Enc.Decode(m.Subject, m.Data, vPtr)
+		if err != nil {
+			// Use error from context instead if already canceled.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			return err
+		}
+	}
+
+	return nil
 }
