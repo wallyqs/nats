@@ -2222,6 +2222,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 		if !ok {
 			return nil, ErrConnectionClosed
 		}
+
 		// Update some stats.
 		s.mu.Lock()
 		s.delivered++

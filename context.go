@@ -21,14 +21,6 @@ func (nc *Conn) RequestWithContext(ctx context.Context, subj string, data []byte
 
 	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch)
 	if err != nil {
-		// If we errored here but context has been canceled already
-		// then return the error from the context instead.
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
 		return nil, err
 	}
 	s.AutoUnsubscribe(1)
@@ -36,13 +28,6 @@ func (nc *Conn) RequestWithContext(ctx context.Context, subj string, data []byte
 
 	err = nc.PublishRequest(subj, inbox, data)
 	if err != nil {
-		// Use error from context instead if already canceled.
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
 		return nil, err
 	}
 
@@ -60,9 +45,10 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 		return nil, ErrBadSubscription
 	}
 
-	// Check whether subscription is in a valid state
-	// to process a next message.
 	s.mu.Lock()
+
+	// Check first whether subscription is in a valid state
+	// to process another message.
 	err := s.validateNextMsgCall()
 	if err != nil {
 		s.mu.Unlock()
@@ -126,13 +112,6 @@ func (c *EncodedConn) RequestWithContext(
 	}
 	b, err := c.Enc.Encode(subject, v)
 	if err != nil {
-		// Use error from context instead if already canceled.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		return err
 	}
 	m, err := c.Conn.RequestWithContext(ctx, subject, b)
@@ -143,15 +122,8 @@ func (c *EncodedConn) RequestWithContext(
 		mPtr := vPtr.(*Msg)
 		*mPtr = *m
 	} else {
-		err = c.Enc.Decode(m.Subject, m.Data, vPtr)
+		err := c.Enc.Decode(m.Subject, m.Data, vPtr)
 		if err != nil {
-			// Use error from context instead if already canceled.
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
 			return err
 		}
 	}
