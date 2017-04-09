@@ -2165,6 +2165,47 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int) error {
 	return nil
 }
 
+// NextMsg will return the next message available to a synchronous subscriber
+// or block until one is available. A timeout can be used to return when no
+// message has been delivered.
+func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
+	if s == nil {
+		return nil, ErrBadSubscription
+	}
+
+	s.mu.Lock()
+	err := s.validateNextMsgCall()
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+
+	// snapshot
+	mch := s.mch
+	s.mu.Unlock()
+
+	var ok bool
+	var msg *Msg
+
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+
+	select {
+	case msg, ok = <-mch:
+		if !ok {
+			return nil, ErrConnectionClosed
+		}
+		err := s.processNextMsgDelivered(msg)
+		if err != nil {
+			return nil, err
+		}
+	case <-t.C:
+		return nil, ErrTimeout
+	}
+
+	return msg, nil
+}
+
 // validateNextMsgCall checks whether the subscription is in a valid
 // state to process a next message.  This should be called while holding
 // the lock.
@@ -2190,66 +2231,37 @@ func (s *Subscription) validateNextMsgCall() error {
 	return nil
 }
 
-// NextMsg() will return the next message available to a synchronous subscriber
-// or block until one is available. A timeout can be used to return when no
-// message has been delivered.
-func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
-	if s == nil {
-		return nil, ErrBadSubscription
-	}
-
+// processNextMsgDelivered takes a message and applies the needed
+// accounting to the stats from the subscription, returning an
+// error in case we have the maximum number of messages have been
+// delivered already. It should not be called while holding the lock.
+func (s *Subscription) processNextMsgDelivered(msg *Msg) error {
 	s.mu.Lock()
-	err := s.validateNextMsgCall()
-	if err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-
-	// snapshot
 	nc := s.conn
-	mch := s.mch
 	max := s.max
+
+	// Update some stats.
+	s.delivered++
+	delivered := s.delivered
+	if s.typ == SyncSubscription {
+		s.pMsgs--
+		s.pBytes -= len(msg.Data)
+	}
 	s.mu.Unlock()
 
-	var ok bool
-	var msg *Msg
-
-	t := time.NewTimer(timeout)
-	defer t.Stop()
-
-	select {
-	case msg, ok = <-mch:
-		if !ok {
-			return nil, ErrConnectionClosed
+	if max > 0 {
+		if delivered > max {
+			return ErrMaxMessages
 		}
-
-		// Update some stats.
-		s.mu.Lock()
-		s.delivered++
-		delivered := s.delivered
-		if s.typ == SyncSubscription {
-			s.pMsgs--
-			s.pBytes -= len(msg.Data)
+		// Remove subscription if we have reached max.
+		if delivered == max {
+			nc.mu.Lock()
+			nc.removeSub(s)
+			nc.mu.Unlock()
 		}
-		s.mu.Unlock()
-
-		if max > 0 {
-			if delivered > max {
-				return nil, ErrMaxMessages
-			}
-			// Remove subscription if we have reached max.
-			if delivered == max {
-				nc.mu.Lock()
-				nc.removeSub(s)
-				nc.mu.Unlock()
-			}
-		}
-
-	case <-t.C:
-		return nil, ErrTimeout
 	}
 
-	return msg, nil
+	return nil
 }
 
 // Queued returns the number of queued messages in the client for this subscription.

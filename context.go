@@ -35,8 +35,8 @@ func (nc *Conn) RequestWithContext(ctx context.Context, subj string, data []byte
 }
 
 // NextMsgWithContext takes a context and returns the next message
-// available to a synchronous subscriber, blocking until either one
-// is available or context gets canceled.
+// available to a synchronous subscriber, blocking until it is delivered
+// or context gets canceled.
 func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	if ctx == nil {
 		panic("nil context")
@@ -46,9 +46,6 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	}
 
 	s.mu.Lock()
-
-	// Check first whether subscription is in a valid state
-	// to process another message.
 	err := s.validateNextMsgCall()
 	if err != nil {
 		s.mu.Unlock()
@@ -56,9 +53,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	}
 
 	// snapshot
-	nc := s.conn
 	mch := s.mch
-	max := s.max
 	s.mu.Unlock()
 
 	var ok bool
@@ -69,27 +64,9 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 		if !ok {
 			return nil, ErrConnectionClosed
 		}
-
-		// Update some stats.
-		s.mu.Lock()
-		s.delivered++
-		delivered := s.delivered
-		if s.typ == SyncSubscription {
-			s.pMsgs--
-			s.pBytes -= len(msg.Data)
-		}
-		s.mu.Unlock()
-
-		if max > 0 {
-			if delivered > max {
-				return nil, ErrMaxMessages
-			}
-			// Remove subscription if we have reached max.
-			if delivered == max {
-				nc.mu.Lock()
-				nc.removeSub(s)
-				nc.mu.Unlock()
-			}
+		err := s.processNextMsgDelivered(msg)
+		if err != nil {
+			return nil, err
 		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
