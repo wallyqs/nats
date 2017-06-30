@@ -114,9 +114,13 @@ func BenchmarkRequest(b *testing.B) {
 	nc := NewDefaultConnection(b)
 	defer nc.Close()
 	ok := []byte("ok")
+
+	// Who responds
 	nc.Subscribe("req", func(m *nats.Msg) {
 		nc.Publish(m.Reply, ok)
 	})
+
+	// Request 
 	b.StartTimer()
 	b.ReportAllocs()
 	q := []byte("q")
@@ -146,6 +150,31 @@ func BenchmarkOldRequest(b *testing.B) {
 	q := []byte("q")
 	for i := 0; i < b.N; i++ {
 		_, err := nc.Request("req", q, 1*time.Second)
+		if err != nil {
+			b.Fatalf("Err %v\n", err)
+		}
+	}
+}
+
+func BenchmarkOldRequestData(b *testing.B) {
+	b.StopTimer()
+	s := RunDefaultServer()
+	defer s.Shutdown()
+	nc, err := nats.Connect(nats.DefaultURL, nats.UseOldRequestStyle())
+	if err != nil {
+		b.Fatalf("Failed to connect: %v", err)
+	}
+	defer nc.Close()
+	ok := []byte("ok")
+	nc.Subscribe("req", func(m *nats.Msg) {
+		nc.Publish(m.Reply, ok)
+	})
+	b.StartTimer()
+	b.ReportAllocs()
+	q := []byte("q")
+	qq := make([]byte, 2)
+	for i := 0; i < b.N; i++ {
+		err := nc.RequestData("req", q, qq, 1*time.Second)
 		if err != nil {
 			b.Fatalf("Err %v\n", err)
 		}

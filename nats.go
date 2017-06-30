@@ -2239,6 +2239,8 @@ func (nc *Conn) oldRequestData(subj string, data []byte, payload []byte, timeout
 	if err != nil {
 		return err
 	}
+	
+	// Main difference with new request
 	sub.AutoUnsubscribe(1)
 	defer sub.Unsubscribe()
 

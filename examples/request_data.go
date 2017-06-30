@@ -40,6 +40,12 @@ func main() {
 	// Constrain a priori the maximum, it is a runtime value.
 	// Set at compile time so that it is on the stack still maybe.
 	// &nats.Msg{}
+	// 
+	// type Response struct {
+	// 	Payload []byte
+	// }
+	// m := &Response{}
+	// 
 
 	payload := make([]byte, 512)
 	err := nc.RequestData("hello", []byte("world"), payload, 1*time.Second)
