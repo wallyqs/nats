@@ -327,6 +327,10 @@ type Subscription struct {
 	pMsgsLimit  int
 	pBytesLimit int
 	dropped     int
+
+	// W: payload for 1:1 request response communication
+	payload []byte
+	pch     chan struct{}
 }
 
 // Msg is a structure used by Subscribers and PublishMsg().
@@ -1507,12 +1511,14 @@ func (nc *Conn) readLoop(wg *sync.WaitGroup) {
 			break
 		}
 
+		// Always 32K because it will never grow it further.
 		n, err := conn.Read(b)
 		if err != nil {
 			nc.processOpErr(err)
 			break
 		}
 
+		// Passing a view of the slice upto 'n'
 		if err := nc.parse(b[:n]); err != nil {
 			nc.processOpErr(err)
 			break
@@ -1572,6 +1578,9 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 	}
 }
 
+// On the heap but only one, 64 bits because it is a pointer.
+var emptyMsg = &Msg{}
+
 // processMsg is called by parse and will place the msg on the
 // appropriate channel/pending queue for processing. If the channel is full,
 // or the pending queue is over the pending limits, the connection is
@@ -1596,15 +1605,54 @@ func (nc *Conn) processMsg(data []byte) {
 	subj := string(nc.ps.ma.subject)
 	reply := string(nc.ps.ma.reply)
 
+	// -----------------------------!!!---------------------------------------
+
 	// Doing message create outside of the sub's lock to reduce contention.
 	// It's possible that we end-up not using the message, but that's ok.
 
 	// FIXME(dlc): Need to copy, should/can do COW?
-	msgPayload := make([]byte, len(data))
-	copy(msgPayload, data)
+
+	// ==== We don't need this now......
+	// msgPayload := make([]byte, len(data))
+	// copy(msgPayload, data)
+	// sub.payload = data
+
+	// copy onto the provided buffer by the user
+	// fmt.Printf("---- userA: %p\n", sub.payload)
+	var msgPayload []byte
+	if sub.payload != nil {
+		copy(sub.payload, data)
+		// We could signal already that we have the data.
+		if sub.mch != nil {
+			sub.mch <- emptyMsg
+			// select {
+			// case sub.mch <- m:
+			// default:
+			// 	// In case message channel is full then
+			// 	// disconnect from the server.
+			// 	goto slowConsumer
+			// }
+		}
+		// fmt.Println("sent the message........")
+		nc.subsMu.RUnlock()
+
+		// Done for this flow!!!
+		return
+	} else {
+		msgPayload = make([]byte, len(data))
+		copy(msgPayload, data)
+	}
+	// fmt.Printf("---- userA: %p\n", data)
+	// fmt.Printf("---- natsB: %p\n", sub.payload)
 
 	// FIXME(dlc): Should we recycle these containers?
+
+	// Check----
+
+	// Super escape
 	m := &Msg{Data: msgPayload, Subject: subj, Reply: reply, Sub: sub}
+
+	// ------------------------------!!!-------------------------------------
 
 	sub.mu.Lock()
 
@@ -1993,6 +2041,7 @@ func (nc *Conn) respHandler(m *Msg) {
 
 	// Grab mch
 	mch := nc.respMap[rt]
+
 	// Delete the key regardless, one response only.
 	// FIXME(dlc) - should we track responses past 1
 	// just statistics wise?
@@ -2088,6 +2137,78 @@ func (nc *Conn) Request(subj string, data []byte, timeout time.Duration) (*Msg, 
 	return msg, nil
 }
 
+// RequestData will send a request payload and deliver the response message,
+// or an error, including a timeout if no message was received properly.
+func (nc *Conn) RequestData(subj string, data []byte, payload []byte, timeout time.Duration) error {
+	return nc.oldRequestData(subj, data, payload, timeout)
+
+	if nc == nil {
+		return ErrInvalidConnection
+	}
+
+	nc.mu.Lock()
+	// Do setup for the new style.
+	if nc.respMap == nil {
+		// _INBOX wildcard
+		nc.respSub = fmt.Sprintf("%s.*", NewInbox())
+		nc.respMap = make(map[string]chan *Msg)
+	}
+	// Create literal Inbox and map to a chan msg.
+	mch := make(chan *Msg, RequestChanLen)
+
+	respInbox := nc.newRespInbox()
+	token := respToken(respInbox)
+	nc.respMap[token] = mch
+	createSub := nc.respMux == nil
+	ginbox := nc.respSub
+	nc.mu.Unlock()
+
+	if createSub {
+		// Make sure scoped subscription is setup only once.
+		var err error
+		nc.respSetup.Do(func() { err = nc.createRespMux(ginbox) })
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := nc.PublishRequest(subj, respInbox, data); err != nil {
+		return err
+	}
+
+	t := globalTimerPool.Get(timeout)
+	defer globalTimerPool.Put(t)
+
+	var wd bool
+	var msg *Msg
+	// construction!!!
+	// msg := &Msg{
+	// 	Data: payload,
+	// }
+
+	select {
+	case msg, wd = <-mch:
+		if !wd {
+			return ErrConnectionClosed
+		}
+	case <-t.C:
+		nc.mu.Lock()
+		delete(nc.respMap, token)
+		nc.mu.Unlock()
+		return ErrTimeout
+	}
+	fmt.Printf("payload: %p || %v\n", payload, len(payload))
+	fmt.Printf("data   : %p || %v\n", msg.Data, len(msg.Data))
+
+	// bandaid
+	copy(payload, msg.Data)
+
+	// payload = msg.Data[:]
+	fmt.Printf("payload: %p || %v\n", payload, len(payload))
+
+	return nil
+}
+
 // oldRequest will create an Inbox and perform a Request() call
 // with the Inbox reply and return the first reply received.
 // This is optimized for the case of multiple responses.
@@ -2107,6 +2228,37 @@ func (nc *Conn) oldRequest(subj string, data []byte, timeout time.Duration) (*Ms
 		return nil, err
 	}
 	return s.NextMsg(timeout)
+}
+
+// oldRequestData
+func (nc *Conn) oldRequestData(subj string, data []byte, payload []byte, timeout time.Duration) error {
+	inbox := NewInbox()
+	ch := make(chan *Msg, RequestChanLen)
+
+	sub, err := nc.subscribe(inbox, _EMPTY_, nil, ch)
+	if err != nil {
+		return err
+	}
+	sub.AutoUnsubscribe(1)
+	defer sub.Unsubscribe()
+
+	// let the parser loop deposit the chunk of bytes
+	// as soon as it has processed the message for this
+	// style of 1:1 request/response.
+	sub.payload = payload
+
+	err = nc.PublishRequest(subj, inbox, data)
+	if err != nil {
+		return err
+	}
+	_, err = sub.NextMsg(timeout)
+
+	// fmt.Printf("---- user: %p || %+v\n", payload, string(payload))
+	// fmt.Printf("---- nats: %p || %+v\n", msg.Data, string(payload))
+	// bandaid
+	// copy(payload, msg.Data)
+
+	return err
 }
 
 // InboxPrefix is the prefix for all inbox subjects.
