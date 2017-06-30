@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// global pool of *time.Timer's. can be used by multiple goroutines concurrently.
-var globalTimerPool timerPool
+// gpb is a global pool of *time.Timer's. which can be used by
+// multiple goroutines concurrently.
+var gbp timerPool
 
 // timerPool provides GC-able pooling of *time.Timer's.
 // can be used by multiple goroutines concurrently.
