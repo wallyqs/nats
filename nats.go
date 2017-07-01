@@ -328,9 +328,10 @@ type Subscription struct {
 	pBytesLimit int
 	dropped     int
 
-	// W: payload for 1:1 request response communication
-	payload []byte
-	pch     chan struct{}
+	// W: for 1:1 request response communication with min allocs
+	// that prevents escaping.
+	resp []byte
+	pch  chan struct{}
 }
 
 // Msg is a structure used by Subscribers and PublishMsg().
@@ -1619,9 +1620,14 @@ func (nc *Conn) processMsg(data []byte) {
 
 	// copy onto the provided buffer by the user
 	// fmt.Printf("---- userA: %p\n", sub.payload)
-	var msgPayload []byte
-	if sub.payload != nil {
-		copy(sub.payload, data)
+
+	if sub.typ == SingleResponseSubscription {
+		println("doing this", data, data[:])
+		// note: still communicating through the heap......
+		copy(sub.resp, data)
+
+		println("doing this", sub.resp)
+
 		// We could signal already that we have the data.
 		if sub.mch != nil {
 			sub.mch <- emptyMsg
@@ -1638,10 +1644,9 @@ func (nc *Conn) processMsg(data []byte) {
 
 		// Done for this flow!!!
 		return
-	} else {
-		msgPayload = make([]byte, len(data))
-		copy(msgPayload, data)
 	}
+	msgPayload := make([]byte, len(data))
+	copy(msgPayload, data)
 	// fmt.Printf("---- userA: %p\n", data)
 	// fmt.Printf("---- natsB: %p\n", sub.payload)
 
@@ -2197,14 +2202,14 @@ func (nc *Conn) RequestData(subj string, data []byte, payload []byte, timeout ti
 		nc.mu.Unlock()
 		return ErrTimeout
 	}
-	fmt.Printf("payload: %p || %v\n", payload, len(payload))
-	fmt.Printf("data   : %p || %v\n", msg.Data, len(msg.Data))
+	// fmt.Printf("payload: %p || %v\n", payload, len(payload))
+	// fmt.Printf("data   : %p || %v\n", msg.Data, len(msg.Data))
 
 	// bandaid
 	copy(payload, msg.Data)
 
 	// payload = msg.Data[:]
-	fmt.Printf("payload: %p || %v\n", payload, len(payload))
+	// fmt.Printf("payload: %p || %v\n", payload, len(payload))
 
 	return nil
 }
@@ -2231,7 +2236,7 @@ func (nc *Conn) oldRequest(subj string, data []byte, timeout time.Duration) (*Ms
 }
 
 // oldRequestData
-func (nc *Conn) oldRequestData(subj string, data []byte, payload []byte, timeout time.Duration) error {
+func (nc *Conn) oldRequestData(subj string, payload []byte, response []byte, timeout time.Duration) error {
 	inbox := NewInbox()
 	ch := make(chan *Msg, RequestChanLen)
 
@@ -2239,26 +2244,42 @@ func (nc *Conn) oldRequestData(subj string, data []byte, payload []byte, timeout
 	if err != nil {
 		return err
 	}
-	
-	// Main difference with new request
+
+	// Short circuit after getting a single reply back.
+	sub.typ = SingleResponseSubscription
+
+	// Main difference with new request.
 	sub.AutoUnsubscribe(1)
 	defer sub.Unsubscribe()
 
 	// let the parser loop deposit the chunk of bytes
 	// as soon as it has processed the message for this
 	// style of 1:1 request/response.
-	sub.payload = payload
+	// but this is using the heap...
+	// sub.payload = payload
+	// sub.payload = make([]byte, 1024)
+	sub.resp = make([]byte, 128)
 
-	err = nc.PublishRequest(subj, inbox, data)
+	err = nc.PublishRequest(subj, inbox, payload)
 	if err != nil {
 		return err
 	}
+
+	// W: Read message into the buffer here!!!
 	_, err = sub.NextMsg(timeout)
 
 	// fmt.Printf("---- user: %p || %+v\n", payload, string(payload))
 	// fmt.Printf("---- nats: %p || %+v\n", msg.Data, string(payload))
 	// bandaid
 	// copy(payload, msg.Data)
+
+	// overriding!!! wrong!!!
+	// payload = []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	// extra copy call ok????????
+	// this does not allocate!!
+	println("here??", sub.resp)
+	copy(response, sub.resp[:])
 
 	return err
 }
@@ -2436,6 +2457,7 @@ const (
 	SyncSubscription
 	ChanSubscription
 	NilSubscription
+	SingleResponseSubscription
 )
 
 // Type returns the type of Subscription.
