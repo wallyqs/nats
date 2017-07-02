@@ -168,8 +168,7 @@ func (c *EncodedConn) RequestWithContext(ctx context.Context, subject string, v 
 var emptyMsg = []byte("")
 
 // ActiveRequest takes a context, a subject and payload
-// in bytes and request expecting a single response.
-// Designed for long requests.
+// in bytes, and makes a request expecting a single response.
 func (nc *Conn) ActiveRequest(
 	ctx context.Context,
 	subj string,
@@ -196,7 +195,7 @@ func (nc *Conn) ActiveRequest(
 	if err != nil {
 		return nil, err
 	}
-	// cs.AutoUnsubscribe(1)
+	cs.AutoUnsubscribe(1)
 	defer cs.Unsubscribe()
 
 	// Regular inbox for the request is tagged with
@@ -208,6 +207,8 @@ func (nc *Conn) ActiveRequest(
 	}
 	s.AutoUnsubscribe(1)
 	defer s.Unsubscribe()
+
+	// Server roundtrip at this point to ensure ordering.
 	nc.Flush()
 
 	// Make the regular request and wait for reply
@@ -219,18 +220,17 @@ func (nc *Conn) ActiveRequest(
 
 	// Wait for the remote to reply back telling us
 	// that its cancellation context is ready.
-	fmt.Println("starting...")
 	ack, err := cs.NextMsgWithContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	nc.Publish(ack.Reply, []byte("ok thanks!"))
+	// Tell active requestor that can proceed to wait
+	// for the message and that cancellation would propagate.
+	nc.Publish(ack.Reply, emptyMsg)
 
 	// Once cancellation context is setup, then wait
 	// for the reply from the original request.
-	fmt.Println("distributed context prepared...", ack, err)
 	msg, err := s.NextMsgWithContext(ctx)
-	fmt.Println("tres", msg, err)
 	if err != nil {
 		// At this point we have given up waiting for the message,
 		// for example by cancellation propagation from parent context
@@ -245,7 +245,10 @@ func (nc *Conn) ActiveRequest(
 	return msg, nil
 }
 
-// ActiveSubscribe
+// ActiveSubscribe wraps a regular subscription with a context
+// and cancellation propagation semantics by using a special inbox
+// which the requestor can use to signal that is going away
+// so do not need the rest of the processing being done.
 func (nc *Conn) ActiveSubscribe(
 	ctx context.Context,
 	subj string,
@@ -256,21 +259,12 @@ func (nc *Conn) ActiveSubscribe(
 		inbox := m.Reply[respInboxPrefixLen:]
 		cInbox := fmt.Sprintf("_CANCEL.%s", inbox)
 
+		// Cancellation subscription which aborts further processing.
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-
 		as, err := nc.Subscribe(cInbox, func(cm *Msg) {
-			fmt.Println("cancellation!!!!!!!!!!")
-			// Check whether we would block waiting for a signal,
-			// or should return if channel already closed.
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			// Propagate cancellation...
-			// cancel()
+			// Propagate cancellation via context.
+			cancel()
 		})
 		if err != nil {
 			return
@@ -281,24 +275,12 @@ func (nc *Conn) ActiveSubscribe(
 		// processed by server before continuing...
 		nc.Flush()
 
-		// We need to reply back once to client
-		// to signal that we are ready to conform
-		// to the cancellation protocol.
-		// TODO: Timeout context here
-		fmt.Println("setting up cancel........")
-		_, err = nc.RequestWithContext(ctx, cInbox+".ack", []byte("okokok"))
-		if err != nil {
-			fmt.Println("--------------------------------", err)
-			return
-		}
-		fmt.Println("______+__________________")
-
-		// Wait for signal that cancellation is setup
-		// time.Sleep(500 * time.Millisecond)
+		// We need to reply back once to client to signal
+		// that we are ready to conform to the cancellation protocol.
+		nc.Publish(cInbox+".ack", emptyMsg)
 
 		// Start working under new child context which
 		// can be triggered to be cancelled by the remote.
-		fmt.Println("doing things :)")
 		cb(ctx, cancel, m)
 	})
 }
