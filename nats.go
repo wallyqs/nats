@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"net"
@@ -331,7 +332,7 @@ type Subscription struct {
 	// W: for 1:1 request response communication with min allocs
 	// that prevents escaping.
 	resp []byte
-	pch  chan struct{}
+	dch  chan []byte
 }
 
 // Msg is a structure used by Subscribers and PublishMsg().
@@ -1622,15 +1623,18 @@ func (nc *Conn) processMsg(data []byte) {
 	// fmt.Printf("---- userA: %p\n", sub.payload)
 
 	if sub.typ == SingleResponseSubscription {
-		println("doing this", data, data[:])
+		// println("doing this", data, data[:])
 		// note: still communicating through the heap......
-		copy(sub.resp, data)
+		// copy(sub.resp, data)
 
-		println("doing this", sub.resp)
+		// println("doing this", sub.resp)
 
 		// We could signal already that we have the data.
-		if sub.mch != nil {
-			sub.mch <- emptyMsg
+		if sub.dch != nil {
+			println("-------<<", data)
+			view := data[:]
+			println("-------<<", data)
+			sub.dch <- view
 			// select {
 			// case sub.mch <- m:
 			// default:
@@ -1643,6 +1647,7 @@ func (nc *Conn) processMsg(data []byte) {
 		nc.subsMu.RUnlock()
 
 		// Done for this flow!!!
+		// println("done!!!!!!!!!!!!!")
 		return
 	}
 	msgPayload := make([]byte, len(data))
@@ -2121,8 +2126,8 @@ func (nc *Conn) Request(subj string, data []byte, timeout time.Duration) (*Msg, 
 		return nil, err
 	}
 
-	t := globalTimerPool.Get(timeout)
-	defer globalTimerPool.Put(t)
+	t := gbp.Get(timeout)
+	defer gbp.Put(t)
 
 	var ok bool
 	var msg *Msg
@@ -2144,7 +2149,7 @@ func (nc *Conn) Request(subj string, data []byte, timeout time.Duration) (*Msg, 
 
 // RequestData will send a request payload and deliver the response message,
 // or an error, including a timeout if no message was received properly.
-func (nc *Conn) RequestData(subj string, data []byte, payload []byte, timeout time.Duration) error {
+func (nc *Conn) RequestData(subj string, data []byte, payload io.Writer, timeout time.Duration) error {
 	return nc.oldRequestData(subj, data, payload, timeout)
 
 	if nc == nil {
@@ -2181,8 +2186,8 @@ func (nc *Conn) RequestData(subj string, data []byte, payload []byte, timeout ti
 		return err
 	}
 
-	t := globalTimerPool.Get(timeout)
-	defer globalTimerPool.Put(t)
+	t := gbp.Get(timeout)
+	defer gbp.Put(t)
 
 	var wd bool
 	var msg *Msg
@@ -2203,10 +2208,10 @@ func (nc *Conn) RequestData(subj string, data []byte, payload []byte, timeout ti
 		return ErrTimeout
 	}
 	// fmt.Printf("payload: %p || %v\n", payload, len(payload))
-	// fmt.Printf("data   : %p || %v\n", msg.Data, len(msg.Data))
+	fmt.Printf("data   : %p || %v\n", msg.Data, len(msg.Data))
 
 	// bandaid
-	copy(payload, msg.Data)
+	// copy(payload, msg.Data)
 
 	// payload = msg.Data[:]
 	// fmt.Printf("payload: %p || %v\n", payload, len(payload))
@@ -2221,7 +2226,7 @@ func (nc *Conn) oldRequest(subj string, data []byte, timeout time.Duration) (*Ms
 	inbox := NewInbox()
 	ch := make(chan *Msg, RequestChanLen)
 
-	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch)
+	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2236,19 +2241,19 @@ func (nc *Conn) oldRequest(subj string, data []byte, timeout time.Duration) (*Ms
 }
 
 // oldRequestData
-func (nc *Conn) oldRequestData(subj string, payload []byte, response []byte, timeout time.Duration) error {
+func (nc *Conn) oldRequestData(subj string, payload []byte, w io.Writer, timeout time.Duration) error {
 	inbox := NewInbox()
-	ch := make(chan *Msg, RequestChanLen)
 
-	sub, err := nc.subscribe(inbox, _EMPTY_, nil, ch)
+	// W: Buffered channel which ensures single response only.
+	ch := make(chan []byte, 1)
+	sub, err := nc.subscribe(inbox, _EMPTY_, nil, nil, ch)
 	if err != nil {
 		return err
 	}
-
 	// Short circuit after getting a single reply back.
-	sub.typ = SingleResponseSubscription
+	// sub.typ = SingleResponseSubscription
 
-	// Main difference with new request.
+	// Main difference with new style request.
 	sub.AutoUnsubscribe(1)
 	defer sub.Unsubscribe()
 
@@ -2258,7 +2263,7 @@ func (nc *Conn) oldRequestData(subj string, payload []byte, response []byte, tim
 	// but this is using the heap...
 	// sub.payload = payload
 	// sub.payload = make([]byte, 1024)
-	sub.resp = make([]byte, 128)
+	// sub.resp = make([]byte, 128)
 
 	err = nc.PublishRequest(subj, inbox, payload)
 	if err != nil {
@@ -2266,7 +2271,8 @@ func (nc *Conn) oldRequestData(subj string, payload []byte, response []byte, tim
 	}
 
 	// W: Read message into the buffer here!!!
-	_, err = sub.NextMsg(timeout)
+	// ReadNextMsgData?
+	err = sub.WriteNextMsgData(w, timeout)
 
 	// fmt.Printf("---- user: %p || %+v\n", payload, string(payload))
 	// fmt.Printf("---- nats: %p || %+v\n", msg.Data, string(payload))
@@ -2278,8 +2284,10 @@ func (nc *Conn) oldRequestData(subj string, payload []byte, response []byte, tim
 
 	// extra copy call ok????????
 	// this does not allocate!!
-	println("here??", sub.resp)
-	copy(response, sub.resp[:])
+
+	// should be done internally!!!!
+	// println("here??", sub.resp)
+	// copy(response, sub.resp[:])
 
 	return err
 }
@@ -2324,19 +2332,19 @@ func respToken(respInbox string) string {
 // subscription is a synchronous subscription and can be polled via
 // Subscription.NextMsg().
 func (nc *Conn) Subscribe(subj string, cb MsgHandler) (*Subscription, error) {
-	return nc.subscribe(subj, _EMPTY_, cb, nil)
+	return nc.subscribe(subj, _EMPTY_, cb, nil, nil)
 }
 
 // ChanSubscribe will place all messages received on the channel.
 // You should not close the channel until sub.Unsubscribe() has been called.
 func (nc *Conn) ChanSubscribe(subj string, ch chan *Msg) (*Subscription, error) {
-	return nc.subscribe(subj, _EMPTY_, nil, ch)
+	return nc.subscribe(subj, _EMPTY_, nil, ch, nil)
 }
 
 // ChanQueueSubscribe will place all messages received on the channel.
 // You should not close the channel until sub.Unsubscribe() has been called.
 func (nc *Conn) ChanQueueSubscribe(subj, group string, ch chan *Msg) (*Subscription, error) {
-	return nc.subscribe(subj, group, nil, ch)
+	return nc.subscribe(subj, group, nil, ch, nil)
 }
 
 // SubscribeSync is syntactic sugar for Subscribe(subject, nil).
@@ -2345,7 +2353,7 @@ func (nc *Conn) SubscribeSync(subj string) (*Subscription, error) {
 		return nil, ErrInvalidConnection
 	}
 	mch := make(chan *Msg, nc.Opts.SubChanLen)
-	s, e := nc.subscribe(subj, _EMPTY_, nil, mch)
+	s, e := nc.subscribe(subj, _EMPTY_, nil, mch, nil)
 	if s != nil {
 		s.typ = SyncSubscription
 	}
@@ -2357,7 +2365,7 @@ func (nc *Conn) SubscribeSync(subj string) (*Subscription, error) {
 // only one member of the group will be selected to receive any given
 // message asynchronously.
 func (nc *Conn) QueueSubscribe(subj, queue string, cb MsgHandler) (*Subscription, error) {
-	return nc.subscribe(subj, queue, cb, nil)
+	return nc.subscribe(subj, queue, cb, nil, nil)
 }
 
 // QueueSubscribeSync creates a synchronous queue subscriber on the given
@@ -2366,7 +2374,7 @@ func (nc *Conn) QueueSubscribe(subj, queue string, cb MsgHandler) (*Subscription
 // given message synchronously.
 func (nc *Conn) QueueSubscribeSync(subj, queue string) (*Subscription, error) {
 	mch := make(chan *Msg, nc.Opts.SubChanLen)
-	s, e := nc.subscribe(subj, queue, nil, mch)
+	s, e := nc.subscribe(subj, queue, nil, mch, nil)
 	if s != nil {
 		s.typ = SyncSubscription
 	}
@@ -2375,11 +2383,11 @@ func (nc *Conn) QueueSubscribeSync(subj, queue string) (*Subscription, error) {
 
 // QueueSubscribeSyncWithChan is syntactic sugar for ChanQueueSubscribe(subject, group, ch).
 func (nc *Conn) QueueSubscribeSyncWithChan(subj, queue string, ch chan *Msg) (*Subscription, error) {
-	return nc.subscribe(subj, queue, nil, ch)
+	return nc.subscribe(subj, queue, nil, ch, nil)
 }
 
 // subscribe is the internal subscribe function that indicates interest in a subject.
-func (nc *Conn) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg) (*Subscription, error) {
+func (nc *Conn) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, dch chan []byte) (*Subscription, error) {
 	if nc == nil {
 		return nil, ErrInvalidConnection
 	}
@@ -2393,7 +2401,7 @@ func (nc *Conn) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg) (*Sub
 		return nil, ErrConnectionClosed
 	}
 
-	if cb == nil && ch == nil {
+	if cb == nil && ch == nil && dch == nil {
 		return nil, ErrBadSubscription
 	}
 
@@ -2408,6 +2416,11 @@ func (nc *Conn) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg) (*Sub
 		sub.typ = AsyncSubscription
 		sub.pCond = sync.NewCond(&sub.mu)
 		go nc.waitForMsgs(sub)
+	} else if dch != nil {
+		// Subscription type optimized for single response only requests
+		// W: Buffered data channel optimized for single response requests.
+		sub.typ = SingleResponseSubscription
+		sub.dch = dch
 	} else {
 		sub.typ = ChanSubscription
 		sub.mch = ch
@@ -2570,8 +2583,9 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	var ok bool
 	var msg *Msg
 
-	t := globalTimerPool.Get(timeout)
-	defer globalTimerPool.Put(t)
+	// grab timer from pool to minimize allocations.
+	t := gbp.Get(timeout)
+	defer gbp.Put(t)
 
 	select {
 	case msg, ok = <-mch:
@@ -2587,6 +2601,57 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	}
 
 	return msg, nil
+}
+
+func (s *Subscription) WriteNextMsgData(w io.Writer, timeout time.Duration) error {
+	if s == nil {
+		return ErrBadSubscription
+	}
+
+	s.mu.Lock()
+	err := s.validateNextMsgState()
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	// snapshot
+	dch := s.dch
+	s.mu.Unlock()
+
+	// grab timer from pool to minimize allocations.
+	t := gbp.Get(timeout)
+	defer gbp.Put(t)
+
+	// instead of waiting for message, we wait for
+	// the bytes to be picked up???
+	select {
+	case d, wd := <-dch:
+		println("------->>", d)
+		if !wd {
+			return ErrConnectionClosed
+		}
+
+		// Here we should have the bytes from the
+		// response already.
+		// if len(d) <= len(data) {
+		// Fits into the buffer so continue
+		// to do a copy of the rest of the bytes.
+		// copy(data, d)
+		_, err := w.Write(d)
+		return err
+
+		// } else {
+		// Does not fit so throw an error?
+		// Or should we expand??
+		// }
+		// data = append(data, d[:]...)
+		// println("------->>", data)
+	case <-t.C:
+		return ErrTimeout
+	}
+
+	return nil
 }
 
 // validateNextMsgState checks whether the subscription is in a valid
@@ -2842,8 +2907,8 @@ func (nc *Conn) FlushTimeout(timeout time.Duration) (err error) {
 		nc.mu.Unlock()
 		return ErrConnectionClosed
 	}
-	t := globalTimerPool.Get(timeout)
-	defer globalTimerPool.Put(t)
+	t := gbp.Get(timeout)
+	defer gbp.Put(t)
 
 	ch := make(chan bool) // FIXME: Inefficient?
 	nc.sendPing(ch)

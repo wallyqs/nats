@@ -223,7 +223,7 @@ func (c *EncodedConn) subscribe(subject, queue string, cb Handler) (*Subscriptio
 		cbValue.Call(oV)
 	}
 
-	return c.Conn.subscribe(subject, queue, natsCB, nil)
+	return c.Conn.subscribe(subject, queue, natsCB, nil, nil)
 }
 
 // FlushTimeout allows a Flush operation to have an associated timeout.
