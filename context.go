@@ -164,3 +164,46 @@ func (c *EncodedConn) RequestWithContext(ctx context.Context, subject string, v 
 
 	return nil
 }
+
+// ActiveRequestWithContext takes a context, a subject and payload
+// in bytes and request expecting a single response.
+func (nc *Conn) ActiveRequestWithContext(
+	ctx context.Context,
+	subj string,
+	data []byte,
+) (*Msg, error) {
+	if ctx == nil {
+		return nil, ErrInvalidContext
+	}
+	if nc == nil {
+		return nil, ErrInvalidConnection
+	}
+	cancellationInbox := nc.newRespInbox()
+	inbox := NewInbox() + "." + cancellationInbox
+	ch := make(chan *Msg, RequestChanLen)
+
+	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch)
+	if err != nil {
+		return nil, err
+	}
+	s.AutoUnsubscribe(1)
+	defer s.Unsubscribe()
+
+	err = nc.PublishRequest(subj, inbox, data)
+	if err != nil {
+		return nil, err
+	}
+
+	msg, err := s.NextMsgWithContext(ctx)
+	if err != nil {
+		// Publish into the cancellation inbox
+		// so that remote cancels as well in case
+		// it is an active subscription.
+		cInbox := fmt.Sprintf("_INBOX.%s", cancellationInbox)
+		nc.Publish(cInbox, []byte(""))
+
+		return nil, err
+	}
+
+	return msg, nil
+}
