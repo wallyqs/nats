@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/nats-io/go-nats"
@@ -16,60 +14,43 @@ func main() {
 		log.Fatalf("Error: %s", err)
 	}
 
-	// This is a new context with its own cancellation??
-	nc.Subscribe("hello", func(m *nats.Msg) {
-		// Expect to be able to split the request
-		// to get the last inbox bit.
-		log.Println(m.Reply)
-		toks := strings.SplitN(m.Reply, ".", 3)
-		log.Println(toks)
-		log.Println(toks[2])
-		cInbox := toks[2]
-		log.Println(cInbox)
+	// Subscriber
+	nc.ActiveSubscribe(context.Background(), "hello",
+		func(ctx context.Context, cancel context.CancelFunc, m *nats.Msg) {
+			log.Println("-------------:D:D:D:D:DD", m, string(m.Data))
+			// Make requestor give up... there could be more
+			// context aware calls here for example.
+			// time.Sleep(1 * time.Millisecond)
 
-		inbox := fmt.Sprintf("_INBOX.%s", cInbox)
-		ch := make(chan struct{}, 1)
-		nc.Subscribe(inbox, func(mm *nats.Msg) {
-			if ch != nil {
-				log.Println("cancelled!! stop working...", mm)
-				close(ch)
-				// ch = nil
-			}
-		})
-
-		go func() {
-			log.Println("working...")
-			time.Sleep(2 * time.Second)
-			// time.Sleep(2 * time.Millisecond)
-			// check if context is still ongoing
-			// or just give up already...
+			// User should check whether context already done,
+			// either by a parent context cancelling or triggered
+			// by a cancellation signal received from the requestor.
 			select {
-			case _, wd := <-ch:
-				log.Println("closed already without data: ", wd)
+			case <-ctx.Done():
+				log.Println("???????")
+				return
 			default:
-				log.Println("continue...")
+				log.Println("???")
 			}
 
+			// Actual reply
 			nc.Publish(m.Reply, []byte("done!"))
-		}()
+		})
+	nc.Flush()
 
-		select {
-		case _, wd := <-ch:
-			log.Println("----- closed!!", wd)
-		}
-	})
-
-	// Do not expect responses to grow further than this,
-	// that way we can keep them on the stack and reduce
-	// allocations.
-	payload := []byte("example")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	msg, err := nc.ActiveRequestWithContext(ctx, "hello", payload)	
+	// Requestor
+	nc2, err := nats.Connect("nats://127.0.0.1:4222")
 	if err != nil {
-		time.Sleep(3*time.Second)
 		log.Fatalf("Error: %s", err)
 	}
-	log.Printf("Response: %s", string(msg.Data))
+
+	// Calling cancel here would propagate cancellation with the remote
+	// by signaling via the special cancellation inbox.
+	childCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	msg, err := nc2.ActiveRequest(childCtx, "hello", []byte("world"))
+	if err != nil {
+		log.Printf("Error: %s", err)
+	}
+	log.Printf("Response: %+v", msg)
 }
