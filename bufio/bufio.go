@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"unicode/utf8"
 )
 
@@ -526,6 +527,10 @@ type Writer struct {
 	buf []byte
 	n   int
 	wr  io.Writer
+
+	// use concrete type too to be able
+	// prevent some escaping cases on Write.
+	conn *net.TCPConn
 }
 
 // NewWriterSize returns a new Writer whose buffer has at least the specified
@@ -540,9 +545,14 @@ func NewWriterSize(w io.Writer, size int) *Writer {
 	if size <= 0 {
 		size = defaultBufSize
 	}
+
+	// Grab the concrete type of the TCP connection
+	// to bypass the interface.
+	conn := w.(*net.TCPConn)
 	return &Writer{
-		buf: make([]byte, size),
-		wr:  w,
+		buf:  make([]byte, size),
+		wr:   w,
+		conn: conn,
 	}
 }
 
@@ -567,7 +577,10 @@ func (b *Writer) Flush() error {
 	if b.n == 0 {
 		return nil
 	}
-	n, err := b.wr.Write(b.buf[0:b.n])
+	// n, err := b.wr.Write(b.buf[0:b.n])
+
+	// Avoid interface and use concrete type directly.
+	n, err := b.conn.Write(b.buf[0:b.n])
 	if n < b.n && err == nil {
 		err = io.ErrShortWrite
 	}
@@ -596,10 +609,15 @@ func (b *Writer) Buffered() int { return b.n }
 func (b *Writer) Write(p []byte) (nn int, err error) {
 	for len(p) > b.Available() && b.err == nil {
 		var n int
+		// Avoid using Write() to interface here to prevent escaping.
 		if b.Buffered() == 0 {
 			// Large write, empty buffer.
 			// Write directly from p to avoid copy.
-			n, b.err = b.wr.Write(p)
+			// n, b.err = b.wr.Write(p)
+
+			// Write using concrete type here instead.
+			n, b.err = b.conn.Write(p)
+			b.n += n
 		} else {
 			n = copy(b.buf[b.n:], p)
 			b.n += n

@@ -15,6 +15,7 @@ func BenchmarkPublishSpeed(b *testing.B) {
 	nc := NewDefaultConnection(b)
 	defer nc.Close()
 	b.StartTimer()
+	b.ReportAllocs()
 
 	msg := []byte("Hello World")
 
@@ -52,6 +53,7 @@ func BenchmarkPubSubSpeed(b *testing.B) {
 	msg := []byte("Hello World")
 
 	b.StartTimer()
+	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
 		if err := nc.Publish("foo", msg); err != nil {
