@@ -4,7 +4,7 @@
 package nats
 
 import (
-	"bufio"
+	// "bufio"
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/go-nats/bufio"
 	"github.com/nats-io/go-nats/util"
 	"github.com/nats-io/nuid"
 )
@@ -273,7 +274,7 @@ type Conn struct {
 	mch     chan *Msg
 	ach     chan asyncCB
 	pongs   []chan bool
-	scratch [scratchSize]byte
+	scratch [scratchSize]byte // 512 bytes buffer for PUB in heap
 	status  Status
 	initc   bool // true if the connection is performing the initial connect
 	err     error
@@ -328,10 +329,9 @@ type Subscription struct {
 	pBytesLimit int
 	dropped     int
 
-	// W: for 1:1 request response communication with min allocs
+	// For 1:1 request response communication with min allocs
 	// that prevents escaping.
-	resp []byte
-	dch  chan []byte
+	dch chan []byte
 }
 
 // Msg is a structure used by Subscribers and PublishMsg().
@@ -1954,7 +1954,10 @@ func (nc *Conn) publish(subj, reply string, data []byte) error {
 		}
 	}
 
+	// Grab PUB from the scratch buffer.
 	msgh := nc.scratch[:len(_PUB_P_)]
+
+	// Converts subj into bytes???
 	msgh = append(msgh, subj...)
 	msgh = append(msgh, ' ')
 	if reply != "" {
@@ -1984,6 +1987,7 @@ func (nc *Conn) publish(subj, reply string, data []byte) error {
 
 	_, err := nc.bw.Write(msgh)
 	if err == nil {
+		// This always escapes: https://github.com/golang/go/issues/5492
 		_, err = nc.bw.Write(data)
 	}
 	if err == nil {
@@ -2282,8 +2286,7 @@ func (nc *Conn) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, dch c
 		sub.pCond = sync.NewCond(&sub.mu)
 		go nc.waitForMsgs(sub)
 	} else if dch != nil {
-		// Subscription type optimized for single response only requests
-		// W: Buffered data channel optimized for single response requests.
+		// Subscription type optimized for single response, data only requests.
 		sub.typ = SingleResponseSubscription
 		sub.dch = dch
 	} else {
