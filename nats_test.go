@@ -5,7 +5,6 @@ package nats
 ////////////////////////////////////////////////////////////////////////////////
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -327,7 +326,7 @@ func TestUrlArgument(t *testing.T) {
 func TestParserPing(t *testing.T) {
 	c := &Conn{}
 	fake := &bytes.Buffer{}
-	c.bw = bufio.NewWriterSize(fake, c.Opts.ReconnectBufSize)
+	c.bw = NewBufioWriterSize(fake, c.Opts.ReconnectBufSize)
 
 	c.ps = &parseState{}
 
@@ -381,7 +380,7 @@ func TestParserErr(t *testing.T) {
 	c := &Conn{}
 	c.status = CLOSED
 	fake := &bytes.Buffer{}
-	c.bw = bufio.NewWriterSize(fake, c.Opts.ReconnectBufSize)
+	c.bw = NewBufioWriterSize(fake, c.Opts.ReconnectBufSize)
 
 	c.ps = &parseState{}
 

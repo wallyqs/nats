@@ -263,7 +263,7 @@ type Conn struct {
 	conn    net.Conn
 	srvPool []*srv
 	urls    map[string]struct{} // Keep track of all known URLs (used by processInfo)
-	bw      *bufio.Writer
+	bw      *bufioWriter
 	pending *bytes.Buffer
 	fch     chan struct{}
 	info    serverInfo
@@ -892,7 +892,7 @@ func (nc *Conn) createConn() (err error) {
 		// Move to pending buffer.
 		nc.bw.Flush()
 	}
-	nc.bw = bufio.NewWriterSize(nc.conn, defaultBufSize)
+	nc.bw = NewBufioWriterSize(nc.conn, defaultBufSize)
 	return nil
 }
 
@@ -914,7 +914,7 @@ func (nc *Conn) makeTLSConn() {
 	}
 	conn := nc.conn.(*tls.Conn)
 	conn.Handshake()
-	nc.bw = bufio.NewWriterSize(nc.conn, defaultBufSize)
+	nc.bw = NewBufioWriterSize(nc.conn, defaultBufSize)
 }
 
 // waitForExits will wait for all socket watcher Go routines to
@@ -1434,7 +1434,7 @@ func (nc *Conn) processOpErr(err error) {
 		// Create a new pending buffer to underpin the bufio Writer while
 		// we are reconnecting.
 		nc.pending = &bytes.Buffer{}
-		nc.bw = bufio.NewWriterSize(nc.pending, nc.Opts.ReconnectBufSize)
+		nc.bw = NewBufioWriterSize(nc.pending, nc.Opts.ReconnectBufSize)
 
 		go nc.doReconnect()
 		nc.mu.Unlock()
