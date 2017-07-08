@@ -892,6 +892,8 @@ func (nc *Conn) createConn() (err error) {
 		// Move to pending buffer.
 		nc.bw.Flush()
 	}
+
+	// TODO: If doing this, then change into setter.
 	nc.bw = NewBufioWriterSize(nc.conn, defaultBufSize)
 	return nil
 }
