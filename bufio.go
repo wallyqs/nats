@@ -10,7 +10,12 @@
 // the interface but provides buffering and some help for textual I/O.
 package nats
 
-import "io"
+import (
+	"bytes"
+	"crypto/tls"
+	"io"
+	"net"
+)
 
 // buffered output
 
@@ -25,6 +30,20 @@ type bufioWriter struct {
 	buf []byte
 	n   int
 	wr  io.Writer
+
+	// conn is the concrete type of the writer
+	// when we are connected, in order to be able prevent
+	// escaping pub payloads via bufio.Write()
+	// https://github.com/golang/go/issues/5492
+	conn *net.TCPConn
+
+	// pending is the concrete type of the writer
+	// when we are reconnecting.
+	pending *bytes.Buffer
+
+	// sconn represents the secure connection and concrete type
+	// of the bufio.Writer.
+	sconn *tls.Conn
 }
 
 // NewWriterSize returns a new Writer whose buffer has at least the specified
@@ -37,12 +56,34 @@ func NewBufioWriterSize(w io.Writer, size int) *bufioWriter {
 		return b
 	}
 	if size <= 0 {
+		// 32K bytes by default
 		size = defaultBufSize
 	}
-	return &bufioWriter{
-		buf: make([]byte, size),
-		wr:  w,
+
+	// Grab the concrete type of the TCP connection
+	// to bypass the interface.
+	var bwr *bufioWriter
+	if conn, ok := w.(*net.TCPConn); ok {
+		bwr = &bufioWriter{
+			buf:  make([]byte, size),
+			wr:   w,
+			conn: conn,
+		}
+	} else if buffer, ok := w.(*bytes.Buffer); ok {
+		bwr = &bufioWriter{
+			buf:     make([]byte, size),
+			wr:      w,
+			pending: buffer,
+		}
+	} else if sconn, ok := w.(*tls.Conn); ok {
+		bwr = &bufioWriter{
+			buf:   make([]byte, size),
+			wr:    w,
+			sconn: sconn,
+		}
 	}
+
+	return bwr
 }
 
 // Flush writes any buffered data to the underlying io.Writer.
@@ -53,7 +94,19 @@ func (b *bufioWriter) Flush() error {
 	if b.n == 0 {
 		return nil
 	}
-	n, err := b.wr.Write(b.buf[0:b.n])
+
+	// Avoid interface and use concrete type directly.
+	// n, err := b.wr.Write(b.buf[0:b.n])
+	var n int
+	var err error
+	if b.conn != nil {
+		n, err = b.conn.Write(b.buf[0:b.n])
+	} else if b.pending != nil {
+		n, err = b.pending.Write(b.buf[0:b.n])
+	} else if b.sconn != nil {
+		n, err = b.sconn.Write(b.buf[0:b.n])
+	}
+
 	if n < b.n && err == nil {
 		err = io.ErrShortWrite
 	}
@@ -85,7 +138,15 @@ func (b *bufioWriter) Write(p []byte) (nn int, err error) {
 		if b.Buffered() == 0 {
 			// Large write, empty buffer.
 			// Write directly from p to avoid copy.
-			n, b.err = b.wr.Write(p)
+			// n, b.err = b.wr.Write(p)
+			// Write using concrete type here instead.
+			if b.conn != nil {
+				n, b.err = b.conn.Write(p)
+			} else if b.pending != nil {
+				n, b.err = b.pending.Write(p)
+			} else if b.sconn != nil {
+				n, b.err = b.sconn.Write(p)
+			}
 		} else {
 			n = copy(b.buf[b.n:], p)
 			b.n += n
