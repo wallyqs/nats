@@ -29,7 +29,6 @@ type bufioWriter struct {
 	err error
 	buf []byte
 	n   int
-	wr  io.Writer
 
 	// conn is the concrete type of the writer
 	// when we are connected, in order to be able prevent
@@ -50,7 +49,7 @@ type bufioWriter struct {
 // size. If the argument io.Writer is already a Writer with large enough
 // size, it returns the underlying Writer.
 func NewBufioWriterSize(w io.Writer, size int) *bufioWriter {
-	// Is it already a Writer?
+	// Is it already a bufioWriter?
 	b, ok := w.(*bufioWriter)
 	if ok && len(b.buf) >= size {
 		return b
@@ -62,28 +61,25 @@ func NewBufioWriterSize(w io.Writer, size int) *bufioWriter {
 
 	// Grab the concrete type of the TCP connection
 	// to bypass the interface.
-	var bwr *bufioWriter
-	if conn, ok := w.(*net.TCPConn); ok {
-		bwr = &bufioWriter{
+	switch wr := w.(type) {
+	case *net.TCPConn:
+		return &bufioWriter{
 			buf:  make([]byte, size),
-			wr:   w,
-			conn: conn,
+			conn: wr,
 		}
-	} else if buffer, ok := w.(*bytes.Buffer); ok {
-		bwr = &bufioWriter{
+	case *bytes.Buffer:
+		return &bufioWriter{
 			buf:     make([]byte, size),
-			wr:      w,
-			pending: buffer,
+			pending: wr,
 		}
-	} else if sconn, ok := w.(*tls.Conn); ok {
-		bwr = &bufioWriter{
+	case *tls.Conn:
+		return &bufioWriter{
 			buf:   make([]byte, size),
-			wr:    w,
-			sconn: sconn,
+			sconn: wr,
 		}
 	}
 
-	return bwr
+	return nil
 }
 
 // Flush writes any buffered data to the underlying io.Writer.
