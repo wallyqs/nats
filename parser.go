@@ -121,7 +121,7 @@ func (nc *Conn) parse(buf []byte) error {
 				if nc.ps.argBuf != nil {
 					arg = nc.ps.argBuf
 				} else {
-					arg = buf[nc.ps.as : i-nc.ps.drop]
+					copy(arg, buf[nc.ps.as:i-nc.ps.drop])
 				}
 				if err := nc.processMsgArgs(arg); err != nil {
 					return err
@@ -386,7 +386,7 @@ func (nc *Conn) parse(buf []byte) error {
 	return nil
 
 parseErr:
-	return fmt.Errorf("nats: Parse Error [%d]: '%s'", nc.ps.state, buf[i:])
+	return fmt.Errorf("nats: Parse Error [%d]: '%s'", nc.ps.state, string(buf[i:]))
 }
 
 // cloneMsgArg is used when the split buffer scenario has the pubArg in the existing read buffer, but
@@ -437,13 +437,13 @@ func (nc *Conn) processMsgArgs(arg []byte) error {
 		nc.ps.ma.reply = args[2]
 		nc.ps.ma.size = int(parseInt64(args[3]))
 	default:
-		return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", arg)
+		return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", string(arg))
 	}
 	if nc.ps.ma.sid < 0 {
-		return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", arg)
+		return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
 	}
 	if nc.ps.ma.size < 0 {
-		return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", arg)
+		return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", string(arg))
 	}
 	return nil
 }
