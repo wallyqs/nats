@@ -260,7 +260,8 @@ type Conn struct {
 	Opts    Options
 	wg      *sync.WaitGroup
 	url     *url.URL
-	conn    net.Conn
+	conn    *net.TCPConn
+	sconn   *tls.Conn
 	srvPool []*srv
 	urls    map[string]struct{} // Keep track of all known URLs (used by processInfo)
 	bw      *bufio.Writer
@@ -877,10 +878,11 @@ func (nc *Conn) createConn() (err error) {
 	}
 
 	dialer := nc.Opts.Dialer
-	nc.conn, err = dialer.Dial("tcp", nc.url.Host)
+	conn, err := dialer.Dial("tcp", nc.url.Host)
 	if err != nil {
 		return err
 	}
+	nc.conn = conn.(*net.TCPConn)
 
 	// No clue why, but this stalls and kills performance on Mac (Mavericks).
 	// https://code.google.com/p/go/issues/detail?id=6930
@@ -908,13 +910,12 @@ func (nc *Conn) makeTLSConn() {
 			h, _, _ := net.SplitHostPort(nc.url.Host)
 			tlsCopy.ServerName = h
 		}
-		nc.conn = tls.Client(nc.conn, tlsCopy)
+		nc.sconn = tls.Client(nc.conn, tlsCopy)
 	} else {
-		nc.conn = tls.Client(nc.conn, &tls.Config{InsecureSkipVerify: true})
+		nc.sconn = tls.Client(nc.conn, &tls.Config{InsecureSkipVerify: true})
 	}
-	conn := nc.conn.(*tls.Conn)
-	conn.Handshake()
-	nc.bw = bufio.NewWriterSize(nc.conn, defaultBufSize)
+	nc.sconn.Handshake()
+	nc.bw = bufio.NewWriterSize(nc.sconn, defaultBufSize)
 }
 
 // waitForExits will wait for all socket watcher Go routines to
@@ -1201,7 +1202,14 @@ func (nc *Conn) sendConnect() error {
 	}
 
 	// Now read the response from the server.
-	br := bufio.NewReaderSize(nc.conn, defaultBufSize)
+	var br *bufio.Reader
+
+	if nc.sconn != nil {
+		br = bufio.NewReaderSize(nc.sconn, defaultBufSize)
+	} else {
+		br = bufio.NewReaderSize(nc.conn, defaultBufSize)
+	}
+
 	line, err := br.ReadString('\n')
 	if err != nil {
 		return err
@@ -1247,7 +1255,13 @@ type control struct {
 
 // Read a control line and process the intended op.
 func (nc *Conn) readOp(c *control) error {
-	br := bufio.NewReaderSize(nc.conn, defaultBufSize)
+	var br *bufio.Reader
+
+	if nc.sconn != nil {
+		br = bufio.NewReaderSize(nc.sconn, defaultBufSize)
+	} else {
+		br = bufio.NewReaderSize(nc.conn, defaultBufSize)
+	}
 	line, err := br.ReadString('\n')
 	if err != nil {
 		return err
@@ -1429,6 +1443,7 @@ func (nc *Conn) processOpErr(err error) {
 			nc.bw.Flush()
 			nc.conn.Close()
 			nc.conn = nil
+			nc.sconn = nil
 		}
 
 		// Create a new pending buffer to underpin the bufio Writer while
@@ -1501,21 +1516,35 @@ func (nc *Conn) readLoop(wg *sync.WaitGroup) {
 			nc.ps = &parseState{}
 		}
 		conn := nc.conn
+		sconn := nc.sconn
 		nc.mu.Unlock()
 
 		if sb || conn == nil {
 			break
 		}
 
-		n, err := conn.Read(b)
-		if err != nil {
-			nc.processOpErr(err)
-			break
-		}
+		if sconn != nil {
+			n, err := sconn.Read(b)
+			if err != nil {
+				nc.processOpErr(err)
+				break
+			}
 
-		if err := nc.parse(b[:n]); err != nil {
-			nc.processOpErr(err)
-			break
+			if err := nc.parse(b[:n]); err != nil {
+				nc.processOpErr(err)
+				break
+			}
+		} else {
+			n, err := conn.Read(b)
+			if err != nil {
+				nc.processOpErr(err)
+				break
+			}
+
+			if err := nc.parse(b[:n]); err != nil {
+				nc.processOpErr(err)
+				break
+			}
 		}
 	}
 	// Clear the parseState here..
