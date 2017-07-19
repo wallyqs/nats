@@ -1620,11 +1620,8 @@ func (nc *Conn) processMsg(data []byte) {
 		nc.subsMu.RUnlock()
 		return
 	}
-
-	// Copy them into string, should just be a string to avoid
-	// allocating buffers of slices of bytes?
+	// Copy subject and reply directly from parser state.
 	subj := nc.ps.ma.subject
-	fmt.Println("--------------", subj)
 	reply := nc.ps.ma.reply
 
 	// Doing message create outside of the sub's lock to reduce contention.

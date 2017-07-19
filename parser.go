@@ -122,8 +122,7 @@ func (nc *Conn) parse(buf []byte) error {
 				} else {
 					arg = buf[nc.ps.as : i-nc.ps.drop]
 				}
-				// Prevent escaping here!!!
-				if err := nc.processMsgArgs3(arg); err != nil {
+				if err := nc.processMsgArgs(arg); err != nil {
 					return err
 				}
 				nc.ps.drop, nc.ps.as, nc.ps.state = 0, i+1, MSG_PAYLOAD
@@ -138,6 +137,7 @@ func (nc *Conn) parse(buf []byte) error {
 				}
 			}
 		case MSG_PAYLOAD:
+			fmt.Println("..............................................................", nc.ps.ma.subject, nc.ps.ma.sid, nc.ps.ma.reply, nc.ps.ma.size, "||||", nc.ps.msgBuf, string(buf))
 			if nc.ps.msgBuf != nil {
 				if len(nc.ps.msgBuf) >= nc.ps.ma.size {
 					nc.processMsg(nc.ps.msgBuf)
@@ -404,7 +404,7 @@ func (nc *Conn) cloneMsgArg() {
 	}
 }
 
-func (nc *Conn) processMsgArgs3(arg []byte) error {
+func (nc *Conn) processMsgArgs(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
 	// (MSG) first 2 third 4
 	start := -1
@@ -458,6 +458,21 @@ SidLoop:
 	start = -1
 SizeOrReplyLoop:
 	for i, b := range srarg {
+
+		// Check if we are at the end of the buffer, in that case
+		// just grab the size from the protocol line.
+		if i == len(srarg)-1 {
+			nc.ps.ma.size = int(parseInt64(srarg[start : i+1]))
+			if nc.ps.ma.sid < 0 {
+				return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
+			}
+			if nc.ps.ma.size < 0 {
+				return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", string(arg))
+			}
+
+			return nil
+		}
+
 		// We could either abort already gathering bytes if we get the size
 		// or continue gathering if we got a reply inbox.
 		switch b {
@@ -469,48 +484,35 @@ SizeOrReplyLoop:
 				start = i + 1
 				break SizeOrReplyLoop
 			}
-		case '\r', '\n':
-			// Capture the size
-			if start >= 0 {
-				// Take a string copy from the buffer
-				nc.ps.ma.size = int(parseInt64(srarg[start:i]))
-				start = i + 1
-
-				// We are done at this point.
-				if nc.ps.ma.sid < 0 {
-					return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
-				}
-				if nc.ps.ma.size < 0 {
-					return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", string(arg))
-				}
-
-				return nil
-			}
 		default:
 			if start < 0 {
 				start = i
 			}
 		}
+
 	}
 
 	// Subview of the buffer slice
 	sizearg := srarg[start:]
 	start = -1
-SizeLoop:
-	for i, b := range sizearg {
-		switch b {
-		case '\r', '\n':
-			// Capture the size
-			if start >= 0 {
-				// Take a string copy from the buffer
-				nc.ps.ma.size = int(parseInt64(sizearg[start:i]))
-				start = i + 1
-				break SizeLoop
+	for i := range sizearg {
+
+		// Check if we are at the end of the buffer, in that case
+		// just grab the size from the protocol line.
+		if i == len(sizearg)-1 {
+			nc.ps.ma.size = int(parseInt64(sizearg[start : i+1]))
+			if nc.ps.ma.sid < 0 {
+				return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
 			}
-		default:
-			if start < 0 {
-				start = i
+			if nc.ps.ma.size < 0 {
+				return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", string(arg))
 			}
+
+			return nil
+		}
+		
+		if start < 0 {
+			start = i
 		}
 	}
 
