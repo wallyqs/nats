@@ -5,8 +5,9 @@ package nats
 import "fmt"
 
 type msgArg struct {
-	subject []byte
-	reply   []byte
+	// subject []byte
+	subject string
+	reply   string
 	sid     int64
 	size    int
 }
@@ -392,63 +393,67 @@ parseErr:
 // we need to hold onto it into the next read.
 func (nc *Conn) cloneMsgArg() {
 	nc.ps.argBuf = nc.ps.scratch[:0]
-	nc.ps.argBuf = append(nc.ps.argBuf, nc.ps.ma.subject...)
-	nc.ps.argBuf = append(nc.ps.argBuf, nc.ps.ma.reply...)
-	nc.ps.ma.subject = nc.ps.argBuf[:len(nc.ps.ma.subject)]
-	if nc.ps.ma.reply != nil {
-		nc.ps.ma.reply = nc.ps.argBuf[len(nc.ps.ma.subject):]
+
+	subject := []byte(nc.ps.ma.subject)
+	reply := []byte(nc.ps.ma.reply)
+	nc.ps.argBuf = append(nc.ps.argBuf, subject...)
+	nc.ps.argBuf = append(nc.ps.argBuf, reply...)
+	nc.ps.ma.subject = string(nc.ps.argBuf[:len(subject)])
+	if nc.ps.ma.reply != "" {
+		nc.ps.ma.reply = string(nc.ps.argBuf[len(subject):])
 	}
 }
 
 // processMsgArgs1 ------------------------------------------------------------------
-const argsLenMax = 4
+// const argsLenMax = 4
 
-func (nc *Conn) processMsgArgs1(arg []byte) error {
-	// Unroll splitArgs to avoid runtime/heap issues
-	a := [argsLenMax][]byte{}
-	args := a[:0]
-	start := -1
-	for i, b := range arg {
-		switch b {
-		case ' ', '\t', '\r', '\n':
-			if start >= 0 {
-				args = append(args, arg[start:i])
-				start = -1
-			}
-		default:
-			if start < 0 {
-				start = i
-			}
-		}
-	}
-	if start >= 0 {
-		args = append(args, arg[start:])
-	}
+// func (nc *Conn) processMsgArgs1(arg []byte) error {
+// 	// Unroll splitArgs to avoid runtime/heap issues
+// 	a := [argsLenMax][]byte{}
+// 	args := a[:0]
+// 	start := -1
+// 	for i, b := range arg {
+// 		switch b {
+// 		case ' ', '\t', '\r', '\n':
+// 			if start >= 0 {
+// 				args = append(args, arg[start:i])
+// 				start = -1
+// 			}
+// 		default:
+// 			if start < 0 {
+// 				start = i
+// 			}
+// 		}
+// 	}
+// 	if start >= 0 {
+// 		args = append(args, arg[start:])
+// 	}
 
-	switch len(args) {
-	case 3:
-		nc.ps.ma.subject = args[0]
-		nc.ps.ma.sid = parseInt64(args[1])
-		nc.ps.ma.reply = nil
-		nc.ps.ma.size = int(parseInt64(args[2]))
-	case 4:
-		nc.ps.ma.subject = args[0]
-		nc.ps.ma.sid = parseInt64(args[1])
-		nc.ps.ma.reply = args[2]
-		nc.ps.ma.size = int(parseInt64(args[3]))
-	default:
-		return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", arg)
-	}
-	if nc.ps.ma.sid < 0 {
-		return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", arg)
-	}
-	if nc.ps.ma.size < 0 {
-		return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", arg)
-	}
-	return nil
-}
+// 	switch len(args) {
+// 	case 3:
+// 		nc.ps.ma.subject = args[0]
+// 		nc.ps.ma.sid = parseInt64(args[1])
+// 		nc.ps.ma.reply = nil
+// 		nc.ps.ma.size = int(parseInt64(args[2]))
+// 	case 4:
+// 		nc.ps.ma.subject = args[0]
+// 		nc.ps.ma.sid = parseInt64(args[1])
+// 		nc.ps.ma.reply = args[2]
+// 		nc.ps.ma.size = int(parseInt64(args[3]))
+// 	default:
+// 		return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", arg)
+// 	}
+// 	if nc.ps.ma.sid < 0 {
+// 		return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", arg)
+// 	}
+// 	if nc.ps.ma.size < 0 {
+// 		return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", arg)
+// 	}
+// 	return nil
+// }
 
-// processMsgArgs2 ------------------------------------------------------------------ 
+// processMsgArgs3 -----------------------------------------------------------------------------
+
 const (
 	_MSG_ARG_SUB = iota
 	_MSG_ARG_SID
@@ -456,144 +461,142 @@ const (
 	_MSG_ARG_SIZE
 )
 
-func (nc *Conn) processMsgArgs2(arg []byte) error {
-	// fmt.Println(arg)
-	// fmt.Println(string(arg))
+func (nc *Conn) processMsgArgs3(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
 	// (MSG) first 2 third 4
 	start := -1
 
-	// Hardcode reply for now
+	// ----- Hardcoded while in development
 	// nc.ps.ma.subject = []byte("hello")
-	// nc.ps.ma.sid = 1
-	// nc.ps.ma.reply = nil
-	// nc.ps.ma.size = 12
+	nc.ps.ma.sid = 1
+	// nc.ps.ma.reply = ""
+	nc.ps.ma.size = 12
+	// -------------------------------------
 
+	// Make a manual msg arg protocol line parser
 	// SUB -> SID -> REPLY -> BYTES
-	state := _MSG_ARG_SUB
-
-	// Could reuse the same slices as part of the conn state,
-	// like the scratch buffer?
-	sub := []byte{}
-	sid := []byte{}
-	reply := []byte{}
-	size := []byte{}
-
 	for i, b := range arg {
-		// fmt.Println("====", start, i, b, string(b))
-		switch state {
-		case _MSG_ARG_SUB:
-			switch b {
-			case ' ', '\t':
-				// Change state to capture SID
-				state = _MSG_ARG_SID
-				if start >= 0 {
-					// fmt.Println("------", arg[start:i], string(arg[start:i]))
-					for _, bb := range arg[start:i] {
-						sub = append(sub, bb)
-					}
+		fmt.Println("====", start, i, b, string(b))
 
-					start = i + 1
-				}
-			default:
-				if start < 0 {
-					start = i
-				}
-			}
-		case _MSG_ARG_SID:
-			switch b {
-			case ' ', '\t':
-				// Change state to capture either reply or size
-				state = _MSG_ARG_REPLY_OR_SIZE
-				if start >= 0 {
-					// fmt.Println("------", arg[start:i], string(arg[start:i]))
-					for _, bb := range arg[start:i] {
-						sid = append(sid, bb)
-					}
+		// Parse subject
+		switch b {
+		case ' ', '\t':
+			// Change state to capture SID
+			if start >= 0 {
+				// fmt.Println("------", arg[start:i], string(arg[start:i]))
+				// set here directly
 
-					start = i + 1
-				}
-			default:
-				if start < 0 {
-					start = i
-				}
-			}
-		case _MSG_ARG_REPLY_OR_SIZE:
-			// fmt.Println("____________________", b, string(b), "====", start, i, len(arg))
+				// This makes the buffer escape, should it just be a string?
+				// nc.ps.ma.subject = make([]byte, len(arg[start:i]))
+				// copy(nc.ps.ma.subject, arg[start:i])
 
-			if i+1 == len(arg) {
-				// We are done
-				for _, bb := range arg[start:i+1] {
-					size = append(size, bb)
-				}
-				// fmt.Println("done???")
+				// Take a string copy from the buffer
+				nc.ps.ma.subject = string(arg[start:i])
+				fmt.Println("---------------------------", nc.ps.ma.subject)
+
+				// Loop to get the 'sid' next
+				start = i + 1
 				break
 			}
-
-			// Check if we are not at then end
-			// case '\r', '\n':
-			// // Means that we are done reading protocol line.
-			// state = _MSG_ARG_SIZE
-			// if start >= 0 {
-			// 	fmt.Println("------", arg[start:i], string(arg[start:i]))
-			// 	for _, bb := range arg[start:i] {
-			// 		size = append(size, bb)
-			// 	}
-			// 
-			// 	start = i + 1
-			// }
-			
-			switch b {
-			case ' ', '\t':
-				// Means that we are getting a reply here,
-				// so switch to capture size.
-				state = _MSG_ARG_SIZE
-				if start >= 0 {
-					// fmt.Println("------", arg[start:i], string(arg[start:i]))
-					for _, bb := range arg[start:i] {
-						reply = append(reply, bb)
-					}
-
-					start = i + 1
-				}
-			default:
-				if start < 0 {
-					start = i
-				}
-			}
-		case _MSG_ARG_SIZE:
-			// fmt.Println(b, string(b))
-			switch b {
-			case '\r', '\n':
-				// Means that we are getting a reply here,
-				// so switch to capture size.
-				state = _MSG_ARG_SIZE
-				if start >= 0 {
-					// fmt.Println("------", arg[start:i], string(arg[start:i]))
-					for _, bb := range arg[start:i] {
-						// fmt.Println("-----!", string(bb))
-						sid = append(sid, bb)
-						// fmt.Println("=====!", string(sub))
-					}
-
-					start = -1
-				}
-			default:
-				if start < 0 {
-					start = i
-				}
+		default:
+			if start < 0 {
+				start = i
 			}
 		}
+		// case _MSG_ARG_SID:
+		// 	switch b {
+		// 	case ' ', '\t':
+		// 		// Change state to capture either reply or size
+		// 		state = _MSG_ARG_REPLY_OR_SIZE
+		// 		if start >= 0 {
+		// 			// fmt.Println("------", arg[start:i], string(arg[start:i]))
+		// 			for _, bb := range arg[start:i] {
+		// 				sid = append(sid, bb)
+		// 			}
+
+		// 			start = i + 1
+		// 		}
+		// 	default:
+		// 		if start < 0 {
+		// 			start = i
+		// 		}
+		// 	}
+		// case _MSG_ARG_REPLY_OR_SIZE:
+		// 	// fmt.Println("____________________", b, string(b), "====", start, i, len(arg))
+
+		// 	if i+1 == len(arg) {
+		// 		// We are done
+		// 		for _, bb := range arg[start : i+1] {
+		// 			size = append(size, bb)
+		// 		}
+		// 		// fmt.Println("done???")
+		// 		break
+		// 	}
+
+		// 	// Check if we are not at then end
+		// 	// case '\r', '\n':
+		// 	// // Means that we are done reading protocol line.
+		// 	// state = _MSG_ARG_SIZE
+		// 	// if start >= 0 {
+		// 	// 	fmt.Println("------", arg[start:i], string(arg[start:i]))
+		// 	// 	for _, bb := range arg[start:i] {
+		// 	// 		size = append(size, bb)
+		// 	// 	}
+		// 	//
+		// 	// 	start = i + 1
+		// 	// }
+
+		// 	switch b {
+		// 	case ' ', '\t':
+		// 		// Means that we are getting a reply here,
+		// 		// so switch to capture size.
+		// 		state = _MSG_ARG_SIZE
+		// 		if start >= 0 {
+		// 			// fmt.Println("------", arg[start:i], string(arg[start:i]))
+		// 			for _, bb := range arg[start:i] {
+		// 				reply = append(reply, bb)
+		// 			}
+
+		// 			start = i + 1
+		// 		}
+		// 	default:
+		// 		if start < 0 {
+		// 			start = i
+		// 		}
+		// 	}
+		// case _MSG_ARG_SIZE:
+		// 	// fmt.Println(b, string(b))
+		// 	switch b {
+		// 	case '\r', '\n':
+		// 		// Means that we are getting a reply here,
+		// 		// so switch to capture size.
+		// 		state = _MSG_ARG_SIZE
+		// 		if start >= 0 {
+		// 			// fmt.Println("------", arg[start:i], string(arg[start:i]))
+		// 			for _, bb := range arg[start:i] {
+		// 				// fmt.Println("-----!", string(bb))
+		// 				sid = append(sid, bb)
+		// 				// fmt.Println("=====!", string(sub))
+		// 			}
+
+		// 			start = -1
+		// 		}
+		// 	default:
+		// 		if start < 0 {
+		// 			start = i
+		// 		}
+		// 	}
+		// }
 	}
 
 	// fmt.Println("subject", sub)
 	// fmt.Println("sid", sid)
 	// fmt.Println("size", size)
 
-	nc.ps.ma.subject = sub
-	nc.ps.ma.sid = parseInt64(sid)
-	// nc.ps.ma.reply = reply
-	nc.ps.ma.size = int(parseInt64(size))
+	// nc.ps.ma.subject = sub
+	// nc.ps.ma.sid = parseInt64(sid)
+	// // nc.ps.ma.reply = reply
+	// nc.ps.ma.size = int(parseInt64(size))
 
 	// if start >= 0 {
 	// 	// bbb := make([]byte, len(arg[start:]))

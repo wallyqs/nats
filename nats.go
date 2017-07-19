@@ -1621,9 +1621,11 @@ func (nc *Conn) processMsg(data []byte) {
 		return
 	}
 
-	// Copy them into string
-	subj := string(nc.ps.ma.subject)
-	reply := string(nc.ps.ma.reply)
+	// Copy them into string, should just be a string to avoid
+	// allocating buffers of slices of bytes?
+	subj := nc.ps.ma.subject
+	fmt.Println("--------------", subj)
+	reply := nc.ps.ma.reply
 
 	// Doing message create outside of the sub's lock to reduce contention.
 	// It's possible that we end-up not using the message, but that's ok.
