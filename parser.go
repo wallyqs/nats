@@ -461,7 +461,7 @@ SizeOrReplyLoop:
 		// Check if we are at the end of the buffer, in that case
 		// just grab the size from the protocol line.
 		if i == len(srarg)-1 {
-			nc.ps.ma.size = int(parseInt64(srarg[start : i+1]))
+			nc.ps.ma.size = int(parseInt64(srarg))
 			if nc.ps.ma.sid < 0 {
 				return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
 			}
@@ -499,7 +499,7 @@ SizeOrReplyLoop:
 		// Check if we are at the end of the buffer, in that case
 		// just grab the size from the protocol line.
 		if i == len(sizearg)-1 {
-			nc.ps.ma.size = int(parseInt64(sizearg[start : i+1]))
+			nc.ps.ma.size = int(parseInt64(sizearg))
 			if nc.ps.ma.sid < 0 {
 				return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
 			}
@@ -509,7 +509,7 @@ SizeOrReplyLoop:
 
 			return nil
 		}
-		
+
 		if start < 0 {
 			start = i
 		}
