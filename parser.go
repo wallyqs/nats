@@ -137,7 +137,6 @@ func (nc *Conn) parse(buf []byte) error {
 				}
 			}
 		case MSG_PAYLOAD:
-			// fmt.Println("..............................................................", nc.ps.ma.subject, nc.ps.ma.sid, nc.ps.ma.reply, nc.ps.ma.size, "||||", nc.ps.msgBuf, string(buf))
 			if nc.ps.msgBuf != nil {
 				if len(nc.ps.msgBuf) >= nc.ps.ma.size {
 					nc.processMsg(nc.ps.msgBuf)
