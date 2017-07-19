@@ -122,7 +122,7 @@ func (nc *Conn) parse(buf []byte) error {
 					arg = buf[nc.ps.as : i-nc.ps.drop]
 				}
 				// Prevent escaping here!!!
-				if err := nc.processMsgArgs(arg); err != nil {
+				if err := nc.processMsgArgs3(arg); err != nil {
 					return err
 				}
 				nc.ps.drop, nc.ps.as, nc.ps.state = 0, i+1, MSG_PAYLOAD
@@ -400,8 +400,55 @@ func (nc *Conn) cloneMsgArg() {
 	}
 }
 
+// processMsgArgs1 ------------------------------------------------------------------
 const argsLenMax = 4
 
+func (nc *Conn) processMsgArgs1(arg []byte) error {
+	// Unroll splitArgs to avoid runtime/heap issues
+	a := [argsLenMax][]byte{}
+	args := a[:0]
+	start := -1
+	for i, b := range arg {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			if start >= 0 {
+				args = append(args, arg[start:i])
+				start = -1
+			}
+		default:
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		args = append(args, arg[start:])
+	}
+
+	switch len(args) {
+	case 3:
+		nc.ps.ma.subject = args[0]
+		nc.ps.ma.sid = parseInt64(args[1])
+		nc.ps.ma.reply = nil
+		nc.ps.ma.size = int(parseInt64(args[2]))
+	case 4:
+		nc.ps.ma.subject = args[0]
+		nc.ps.ma.sid = parseInt64(args[1])
+		nc.ps.ma.reply = args[2]
+		nc.ps.ma.size = int(parseInt64(args[3]))
+	default:
+		return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", arg)
+	}
+	if nc.ps.ma.sid < 0 {
+		return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", arg)
+	}
+	if nc.ps.ma.size < 0 {
+		return fmt.Errorf("nats: processMsgArgs Bad or Missing Size: '%s'", arg)
+	}
+	return nil
+}
+
+// processMsgArgs2 ------------------------------------------------------------------ 
 const (
 	_MSG_ARG_SUB = iota
 	_MSG_ARG_SID
@@ -409,7 +456,7 @@ const (
 	_MSG_ARG_SIZE
 )
 
-func (nc *Conn) processMsgArgs(arg []byte) error {
+func (nc *Conn) processMsgArgs2(arg []byte) error {
 	// fmt.Println(arg)
 	// fmt.Println(string(arg))
 	// Unroll splitArgs to avoid runtime/heap issues
