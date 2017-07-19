@@ -2,9 +2,7 @@
 
 package nats
 
-import (
-	"fmt"
-)
+import "fmt"
 
 type msgArg struct {
 	subject []byte
@@ -121,8 +119,9 @@ func (nc *Conn) parse(buf []byte) error {
 				if nc.ps.argBuf != nil {
 					arg = nc.ps.argBuf
 				} else {
-					copy(arg, buf[nc.ps.as:i-nc.ps.drop])
+					arg = buf[nc.ps.as : i-nc.ps.drop]
 				}
+				// Prevent escaping here!!!
 				if err := nc.processMsgArgs(arg); err != nil {
 					return err
 				}
@@ -403,42 +402,178 @@ func (nc *Conn) cloneMsgArg() {
 
 const argsLenMax = 4
 
+const (
+	_MSG_ARG_SUB = iota
+	_MSG_ARG_SID
+	_MSG_ARG_REPLY_OR_SIZE
+	_MSG_ARG_SIZE
+)
+
 func (nc *Conn) processMsgArgs(arg []byte) error {
+	// fmt.Println(arg)
+	// fmt.Println(string(arg))
 	// Unroll splitArgs to avoid runtime/heap issues
-	a := [argsLenMax][]byte{}
-	args := a[:0]
+	// (MSG) first 2 third 4
 	start := -1
+
+	// Hardcode reply for now
+	// nc.ps.ma.subject = []byte("hello")
+	// nc.ps.ma.sid = 1
+	// nc.ps.ma.reply = nil
+	// nc.ps.ma.size = 12
+
+	// SUB -> SID -> REPLY -> BYTES
+	state := _MSG_ARG_SUB
+
+	// Could reuse the same slices as part of the conn state,
+	// like the scratch buffer?
+	sub := []byte{}
+	sid := []byte{}
+	reply := []byte{}
+	size := []byte{}
+
 	for i, b := range arg {
-		switch b {
-		case ' ', '\t', '\r', '\n':
-			if start >= 0 {
-				args = append(args, arg[start:i])
-				start = -1
+		// fmt.Println("====", start, i, b, string(b))
+		switch state {
+		case _MSG_ARG_SUB:
+			switch b {
+			case ' ', '\t':
+				// Change state to capture SID
+				state = _MSG_ARG_SID
+				if start >= 0 {
+					// fmt.Println("------", arg[start:i], string(arg[start:i]))
+					for _, bb := range arg[start:i] {
+						sub = append(sub, bb)
+					}
+
+					start = i + 1
+				}
+			default:
+				if start < 0 {
+					start = i
+				}
 			}
-		default:
-			if start < 0 {
-				start = i
+		case _MSG_ARG_SID:
+			switch b {
+			case ' ', '\t':
+				// Change state to capture either reply or size
+				state = _MSG_ARG_REPLY_OR_SIZE
+				if start >= 0 {
+					// fmt.Println("------", arg[start:i], string(arg[start:i]))
+					for _, bb := range arg[start:i] {
+						sid = append(sid, bb)
+					}
+
+					start = i + 1
+				}
+			default:
+				if start < 0 {
+					start = i
+				}
+			}
+		case _MSG_ARG_REPLY_OR_SIZE:
+			// fmt.Println("____________________", b, string(b), "====", start, i, len(arg))
+
+			if i+1 == len(arg) {
+				// We are done
+				for _, bb := range arg[start:i+1] {
+					size = append(size, bb)
+				}
+				// fmt.Println("done???")
+				break
+			}
+
+			// Check if we are not at then end
+			// case '\r', '\n':
+			// // Means that we are done reading protocol line.
+			// state = _MSG_ARG_SIZE
+			// if start >= 0 {
+			// 	fmt.Println("------", arg[start:i], string(arg[start:i]))
+			// 	for _, bb := range arg[start:i] {
+			// 		size = append(size, bb)
+			// 	}
+			// 
+			// 	start = i + 1
+			// }
+			
+			switch b {
+			case ' ', '\t':
+				// Means that we are getting a reply here,
+				// so switch to capture size.
+				state = _MSG_ARG_SIZE
+				if start >= 0 {
+					// fmt.Println("------", arg[start:i], string(arg[start:i]))
+					for _, bb := range arg[start:i] {
+						reply = append(reply, bb)
+					}
+
+					start = i + 1
+				}
+			default:
+				if start < 0 {
+					start = i
+				}
+			}
+		case _MSG_ARG_SIZE:
+			// fmt.Println(b, string(b))
+			switch b {
+			case '\r', '\n':
+				// Means that we are getting a reply here,
+				// so switch to capture size.
+				state = _MSG_ARG_SIZE
+				if start >= 0 {
+					// fmt.Println("------", arg[start:i], string(arg[start:i]))
+					for _, bb := range arg[start:i] {
+						// fmt.Println("-----!", string(bb))
+						sid = append(sid, bb)
+						// fmt.Println("=====!", string(sub))
+					}
+
+					start = -1
+				}
+			default:
+				if start < 0 {
+					start = i
+				}
 			}
 		}
 	}
-	if start >= 0 {
-		args = append(args, arg[start:])
-	}
 
-	switch len(args) {
-	case 3:
-		nc.ps.ma.subject = args[0]
-		nc.ps.ma.sid = parseInt64(args[1])
-		nc.ps.ma.reply = nil
-		nc.ps.ma.size = int(parseInt64(args[2]))
-	case 4:
-		nc.ps.ma.subject = args[0]
-		nc.ps.ma.sid = parseInt64(args[1])
-		nc.ps.ma.reply = args[2]
-		nc.ps.ma.size = int(parseInt64(args[3]))
-	default:
-		return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", string(arg))
-	}
+	// fmt.Println("subject", sub)
+	// fmt.Println("sid", sid)
+	// fmt.Println("size", size)
+
+	nc.ps.ma.subject = sub
+	nc.ps.ma.sid = parseInt64(sid)
+	// nc.ps.ma.reply = reply
+	nc.ps.ma.size = int(parseInt64(size))
+
+	// if start >= 0 {
+	// 	// bbb := make([]byte, len(arg[start:]))
+	// 	// copy(bbb, arg[start:])
+	// 	// args = append(args, []byte(bbb))
+
+	// 	// Works, but escapes...
+	// 	args = append(args, arg[start:])
+	// }
+
+	// --- HANDLE CASE
+
+	// switch len(args) {
+	// case 3:
+	// 	nc.ps.ma.subject = args[0]
+	// 	nc.ps.ma.sid = parseInt64(args[1])
+	// 	nc.ps.ma.reply = nil
+	// 	nc.ps.ma.size = int(parseInt64(args[2]))
+	// case 4:
+	// 	nc.ps.ma.subject = args[0]
+	// 	nc.ps.ma.sid = parseInt64(args[1])
+	// 	nc.ps.ma.reply = args[2]
+	// 	nc.ps.ma.size = int(parseInt64(args[3]))
+	// default:
+	// 	return fmt.Errorf("nats: processMsgArgs Parse Error: '%s'", string(arg))
+	// }
+
 	if nc.ps.ma.sid < 0 {
 		return fmt.Errorf("nats: processMsgArgs Bad or Missing Sid: '%s'", string(arg))
 	}
