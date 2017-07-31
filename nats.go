@@ -6,6 +6,7 @@ package nats
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"runtime"
@@ -882,7 +884,18 @@ func (nc *Conn) createConn() (err error) {
 	}
 
 	dialer := nc.Opts.Dialer
-	nc.conn, err = dialer.Dial("tcp", nc.url.Host)
+
+	ctx := context.Background()
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(network, addr string) {
+			fmt.Println("Connecting to: ", network, addr)
+		},
+		ConnectDone: func(network, addr string, err error) {
+			fmt.Println("Connected to:", network, addr, err)
+		},
+	}
+	ctx = httptrace.WithClientTrace(ctx, trace)
+	nc.conn, err = dialer.DialContext(ctx, "tcp", nc.url.Host)
 	if err != nil {
 		return err
 	}
