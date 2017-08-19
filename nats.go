@@ -1942,19 +1942,25 @@ func (nc *Conn) publish(subj, reply string, data []byte) error {
 	// FIXME(dlc) - Find a better way here.
 	// msgh = strconv.AppendInt(msgh, int64(len(data)), 10)
 
-	var b [12]byte
-	var i = len(b)
-	if len(data) > 0 {
-		for l := len(data); l > 0; l /= 10 {
-			i -= 1
-			b[i] = digits[l%10]
-		}
+	size := len(data)
+	if size < fastSmallInt {
+		b := fastSmall(size)
+		msgh = append(msgh, b...)
 	} else {
-		i -= 1
-		b[i] = digits[0]
+		var b [12]byte
+		var i = len(b)
+		if size > 0 {
+			for l := size; l > 0; l /= 10 {
+				i -= 1
+				b[i] = digits[l%10]
+			}
+		} else {
+			i -= 1
+			b[i] = digits[0]
+		}
+		msgh = append(msgh, b[i:]...)
 	}
 
-	msgh = append(msgh, b[i:]...)
 	msgh = append(msgh, _CRLF_...)
 
 	_, err := nc.bw.Write(msgh)
@@ -1977,6 +1983,36 @@ func (nc *Conn) publish(subj, reply string, data []byte) error {
 	}
 	nc.mu.Unlock()
 	return nil
+}
+
+// fastSmall returns the string for an i with 0 <= i < fastSmallInt
+func fastSmall(i int) string {
+	off := 0
+	a := 0
+	b := 0
+	switch {
+	case i < 10:
+		off = 4
+		a = i*5 + off
+		b = i*5 + 5
+	case i < 100:
+		off = 3
+		a = i*5 + off
+		b = i*5 + 5
+	case i < 1000:
+		off = 2
+		a = i*5 + off
+		b = i*5 + 5
+	case i < 10000:
+		off = 1
+		a = i*5 + off
+		b = i*5 + 5
+	case i < 100000:
+		off = 0
+		a = i*5 + off
+		b = i*5 + 5
+	}
+	return smallsString[a:b]
 }
 
 // respHandler is the global response handler. It will look up
