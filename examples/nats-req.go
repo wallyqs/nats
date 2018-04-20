@@ -17,6 +17,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"time"
 
@@ -40,7 +41,20 @@ func main() {
 		usage()
 	}
 
-	nc, err := nats.Connect(*urls)
+	nc, err := nats.Connect(*urls,
+		nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+			fmt.Printf("Discovered Servers: %+v\n", nc.DiscoveredServers())
+		}),
+		nats.DisconnectHandler(func(nc *nats.Conn) {
+			fmt.Printf("Got disconnected!\n")
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			fmt.Printf("Got reconnected to %v!\n", nc.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			fmt.Printf("Connection closed. Reason: %q\n", nc.LastError())
+		}),
+	)
 	if err != nil {
 		log.Fatalf("Can't connect: %v\n", err)
 	}
