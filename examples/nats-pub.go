@@ -18,6 +18,7 @@ package main
 import (
 	"flag"
 	"log"
+	"time"
 
 	"github.com/nats-io/go-nats"
 )
@@ -29,6 +30,7 @@ func usage() {
 
 func main() {
 	var urls = flag.String("s", nats.DefaultURL, "The nats server URLs (separated by comma)")
+	var forever = flag.Bool("d", false, "Publishes forever until killed")
 
 	log.SetFlags(0)
 	flag.Usage = usage
@@ -47,8 +49,16 @@ func main() {
 
 	subj, msg := args[0], []byte(args[1])
 
-	nc.Publish(subj, msg)
-	nc.Flush()
+	if *forever {
+		log.Printf("Publishing [%s] : '%s'\n", subj, msg)
+		for {
+			nc.Publish(subj, msg)
+			time.Sleep(1 * time.Millisecond)
+		}
+	} else {
+		nc.Publish(subj, msg)
+		nc.Flush()
+	}
 
 	if err := nc.LastError(); err != nil {
 		log.Fatal(err)
