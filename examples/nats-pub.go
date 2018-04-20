@@ -17,6 +17,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"time"
 
@@ -41,7 +42,20 @@ func main() {
 		usage()
 	}
 
-	nc, err := nats.Connect(*urls)
+	nc, err := nats.Connect(*urls,
+		nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+			fmt.Printf("Discovered Servers: %+v\n", nc.DiscoveredServers())
+		}),
+		nats.DisconnectHandler(func(nc *nats.Conn) {
+			fmt.Printf("Got disconnected!\n")
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			fmt.Printf("Got reconnected to %v!\n", nc.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			fmt.Printf("Connection closed. Reason: %q\n", nc.LastError())
+		}),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -51,9 +65,12 @@ func main() {
 
 	if *forever {
 		log.Printf("Publishing [%s] : '%s'\n", subj, msg)
-		for {
+		for range time.NewTicker(1 * time.Millisecond).C {
+			if !nc.IsConnected() {
+				continue
+			}
+
 			nc.Publish(subj, msg)
-			time.Sleep(1 * time.Millisecond)
 		}
 	} else {
 		nc.Publish(subj, msg)
