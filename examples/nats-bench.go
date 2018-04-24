@@ -41,13 +41,28 @@ func usage() {
 var benchmark *bench.Benchmark
 
 func main() {
-	var urls = flag.String("s", nats.DefaultURL, "The nats server URLs (separated by comma)")
-	var tls = flag.Bool("tls", false, "Use TLS Secure Connection")
-	var numPubs = flag.Int("np", DefaultNumPubs, "Number of Concurrent Publishers")
-	var numSubs = flag.Int("ns", DefaultNumSubs, "Number of Concurrent Subscribers")
-	var numMsgs = flag.Int("n", DefaultNumMsgs, "Number of Messages to Publish")
-	var msgSize = flag.Int("ms", DefaultMessageSize, "Size of the message.")
-	var csvFile = flag.String("csv", "", "Save bench data to csv file")
+	var (
+		urls           string
+		tls            bool
+		numPubs        int
+		numSubs        int
+		numMsgs        int
+		msgSize        int
+		csvFile        string
+		rootCACertFile string
+		clientCertFile string
+		clientKeyFile  string
+	)
+	flag.StringVar(&urls, "s", nats.DefaultURL, "The nats server URLs (separated by comma)")
+	flag.BoolVar(&tls, "tls", false, "Use TLS Secure Connection")
+	flag.IntVar(&numPubs, "np", DefaultNumPubs, "Number of Concurrent Publishers")
+	flag.IntVar(&numSubs, "ns", DefaultNumSubs, "Number of Concurrent Subscribers")
+	flag.IntVar(&numMsgs, "n", DefaultNumMsgs, "Number of Messages to Publish")
+	flag.IntVar(&msgSize, "ms", DefaultMessageSize, "Size of the message.")
+	flag.StringVar(&csvFile, "csv", "", "Save bench data to csv file")
+	flag.StringVar(&rootCACertFile, "cacert", "", "Root CA Certificate File")
+	flag.StringVar(&clientCertFile, "cert", "", "Client Certificate File")
+	flag.StringVar(&clientKeyFile, "key", "", "Client Private key")
 
 	log.SetFlags(0)
 	flag.Usage = usage
@@ -58,40 +73,40 @@ func main() {
 		usage()
 	}
 
-	if *numMsgs <= 0 {
+	if numMsgs <= 0 {
 		log.Fatal("Number of messages should be greater than zero.")
 	}
 
 	// Setup the option block
 	opts := nats.GetDefaultOptions()
-	opts.Servers = strings.Split(*urls, ",")
+	opts.Servers = strings.Split(urls, ",")
 	for i, s := range opts.Servers {
 		opts.Servers[i] = strings.Trim(s, " ")
 	}
-	opts.Secure = *tls
+	opts.Secure = tls
 
-	benchmark = bench.NewBenchmark("NATS", *numSubs, *numPubs)
+	benchmark = bench.NewBenchmark("NATS", numSubs, numPubs)
 
 	var startwg sync.WaitGroup
 	var donewg sync.WaitGroup
 
-	donewg.Add(*numPubs + *numSubs)
+	donewg.Add(numPubs + numSubs)
 
 	// Run Subscribers first
-	startwg.Add(*numSubs)
-	for i := 0; i < *numSubs; i++ {
-		go runSubscriber(&startwg, &donewg, opts, *numMsgs, *msgSize)
+	startwg.Add(numSubs)
+	for i := 0; i < numSubs; i++ {
+		go runSubscriber(&startwg, &donewg, opts, numMsgs, msgSize)
 	}
 	startwg.Wait()
 
 	// Now Publishers
-	startwg.Add(*numPubs)
-	pubCounts := bench.MsgsPerClient(*numMsgs, *numPubs)
-	for i := 0; i < *numPubs; i++ {
-		go runPublisher(&startwg, &donewg, opts, pubCounts[i], *msgSize)
+	startwg.Add(numPubs)
+	pubCounts := bench.MsgsPerClient(numMsgs, numPubs)
+	for i := 0; i < numPubs; i++ {
+		go runPublisher(&startwg, &donewg, opts, pubCounts[i], msgSize)
 	}
 
-	log.Printf("Starting benchmark [msgs=%d, msgsize=%d, pubs=%d, subs=%d]\n", *numMsgs, *msgSize, *numPubs, *numSubs)
+	log.Printf("Starting benchmark [msgs=%d, msgsize=%d, pubs=%d, subs=%d]\n", numMsgs, msgSize, numPubs, numSubs)
 
 	startwg.Wait()
 	donewg.Wait()
@@ -100,10 +115,10 @@ func main() {
 
 	fmt.Print(benchmark.Report())
 
-	if len(*csvFile) > 0 {
+	if len(csvFile) > 0 {
 		csv := benchmark.CSV()
-		ioutil.WriteFile(*csvFile, []byte(csv), 0644)
-		fmt.Printf("Saved metric data in csv file %s\n", *csvFile)
+		ioutil.WriteFile(csvFile, []byte(csv), 0644)
+		fmt.Printf("Saved metric data in csv file %s\n", csvFile)
 	}
 }
 

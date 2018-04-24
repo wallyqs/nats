@@ -35,8 +35,18 @@ func printMsg(m *nats.Msg, i int) {
 }
 
 func main() {
-	var urls = flag.String("s", nats.DefaultURL, "The nats server URLs (separated by comma)")
-	var showTime = flag.Bool("t", false, "Display timestamps")
+	var (
+		urls           string
+		showTime       bool
+		rootCACertFile string
+		clientCertFile string
+		clientKeyFile  string
+	)
+	flag.StringVar(&urls, "s", nats.DefaultURL, "The nats server URLs (separated by comma)")
+	flag.BoolVar(&showTime, "t", false, "Display timestamps")
+	flag.StringVar(&rootCACertFile, "cacert", "", "Root CA Certificate File")
+	flag.StringVar(&clientCertFile, "cert", "", "Client Certificate File")
+	flag.StringVar(&clientKeyFile, "key", "", "Client Private key")
 
 	log.SetFlags(0)
 	flag.Usage = usage
@@ -47,20 +57,26 @@ func main() {
 		usage()
 	}
 
-	nc, err := nats.Connect(*urls,
-		nats.DiscoveredServersHandler(func(nc *nats.Conn) {
-			fmt.Printf("Discovered Servers: %+v\n", nc.DiscoveredServers())
-		}),
-		nats.DisconnectHandler(func(nc *nats.Conn) {
-			fmt.Printf("Got disconnected!\n")
-		}),
-		nats.ReconnectHandler(func(nc *nats.Conn) {
-			fmt.Printf("Got reconnected to %v!\n", nc.ConnectedUrl())
-		}),
-		nats.ClosedHandler(func(nc *nats.Conn) {
-			fmt.Printf("Connection closed. Reason: %q\n", nc.LastError())
-		}),
-	)
+	opts := make([]nats.Option, 0)
+	opts = append(opts, nats.DisconnectHandler(func(nc *nats.Conn) {
+		fmt.Printf("Got disconnected!\n")
+	}))
+	opts = append(opts, nats.ReconnectHandler(func(nc *nats.Conn) {
+		fmt.Printf("Got reconnected to %v!\n", nc.ConnectedUrl())
+	}))
+	opts = append(opts, nats.ClosedHandler(func(nc *nats.Conn) {
+		fmt.Printf("Connection closed. Reason: %q\n", nc.LastError())
+	}))
+	opts = append(opts, nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+		fmt.Printf("Discovered Servers: %+v\n", nc.DiscoveredServers())
+	}))
+	if len(rootCACertFile) > 0 {
+		opts = append(opts, nats.RootCAs(rootCACertFile))
+	}
+	if len(clientCertFile) > 0 && len(clientKeyFile) > 0 {
+		opts = append(opts, nats.ClientCert(clientCertFile, clientKeyFile))
+	}
+	nc, err := nats.Connect(urls, opts...)
 	if err != nil {
 		log.Fatalf("Can't connect: %v\n", err)
 	}
@@ -78,7 +94,7 @@ func main() {
 	}
 
 	log.Printf("Listening on [%s]\n", subj)
-	if *showTime {
+	if showTime {
 		log.SetFlags(log.LstdFlags)
 	}
 
