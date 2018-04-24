@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -72,18 +71,35 @@ func main() {
 	if len(args) != 1 {
 		usage()
 	}
-
 	if numMsgs <= 0 {
 		log.Fatal("Number of messages should be greater than zero.")
 	}
 
-	// Setup the option block
-	opts := nats.GetDefaultOptions()
-	opts.Servers = strings.Split(urls, ",")
-	for i, s := range opts.Servers {
-		opts.Servers[i] = strings.Trim(s, " ")
+	opts := make([]nats.Option, 0)
+	opts = append(opts, nats.DisconnectHandler(func(nc *nats.Conn) {
+		if nc.LastError() == nil {
+			return
+		}
+		fmt.Printf("Got disconnected!\n")
+	}))
+	opts = append(opts, nats.ReconnectHandler(func(nc *nats.Conn) {
+		fmt.Printf("Got reconnected to %v!\n", nc.ConnectedUrl())
+	}))
+	opts = append(opts, nats.ClosedHandler(func(nc *nats.Conn) {
+		if nc.LastError() == nil {
+			return
+		}
+		fmt.Printf("Connection closed. Reason: %v\n", nc.LastError())
+	}))
+	opts = append(opts, nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+		fmt.Printf("Discovered Servers: %+v\n", nc.DiscoveredServers())
+	}))
+	if len(rootCACertFile) > 0 {
+		opts = append(opts, nats.RootCAs(rootCACertFile))
 	}
-	opts.Secure = tls
+	if len(clientCertFile) > 0 && len(clientKeyFile) > 0 {
+		opts = append(opts, nats.ClientCert(clientCertFile, clientKeyFile))
+	}
 
 	benchmark = bench.NewBenchmark("NATS", numSubs, numPubs)
 
@@ -95,7 +111,7 @@ func main() {
 	// Run Subscribers first
 	startwg.Add(numSubs)
 	for i := 0; i < numSubs; i++ {
-		go runSubscriber(&startwg, &donewg, opts, numMsgs, msgSize)
+		go runSubscriber(&startwg, &donewg, urls, opts, numMsgs, msgSize)
 	}
 	startwg.Wait()
 
@@ -103,7 +119,7 @@ func main() {
 	startwg.Add(numPubs)
 	pubCounts := bench.MsgsPerClient(numMsgs, numPubs)
 	for i := 0; i < numPubs; i++ {
-		go runPublisher(&startwg, &donewg, opts, pubCounts[i], msgSize)
+		go runPublisher(&startwg, &donewg, urls, opts, pubCounts[i], msgSize)
 	}
 
 	log.Printf("Starting benchmark [msgs=%d, msgsize=%d, pubs=%d, subs=%d]\n", numMsgs, msgSize, numPubs, numSubs)
@@ -122,8 +138,8 @@ func main() {
 	}
 }
 
-func runPublisher(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs int, msgSize int) {
-	nc, err := opts.Connect()
+func runPublisher(startwg, donewg *sync.WaitGroup, urls string, opts []nats.Option, numMsgs int, msgSize int) {
+	nc, err := nats.Connect(urls, opts...)
 	if err != nil {
 		log.Fatalf("Can't connect: %v\n", err)
 	}
@@ -148,8 +164,8 @@ func runPublisher(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs in
 	donewg.Done()
 }
 
-func runSubscriber(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs int, msgSize int) {
-	nc, err := opts.Connect()
+func runSubscriber(startwg, donewg *sync.WaitGroup, urls string, opts []nats.Option, numMsgs int, msgSize int) {
+	nc, err := nats.Connect(urls, opts...)
 	if err != nil {
 		log.Fatalf("Can't connect: %v\n", err)
 	}
