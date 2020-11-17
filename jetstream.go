@@ -17,10 +17,189 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/nats-io/jsm.go/api"
+	"github.com/nats-io/nats.go/jetstream"
 )
+
+// JetStream enhances the client with JetStream functionality.
+func (nc *Conn) JetStream(fopts ...jetstream.Option) (*jsContext, error) {
+	var err error
+	opts := &jetstream.Options{}
+	for _, f := range fopts {
+		if err = f(opts); err != nil {
+			return nil, err
+		}
+	}
+
+	return &jsContext{
+		opts: opts,
+		nc:   nc,
+	}, nil
+}
+
+// jsContext provides JetStream behaviors.
+type jsContext struct {
+	nc   *Conn
+	opts *jetstream.Options
+}
+
+// Publish is like nats.Publish but also returns the ack response.
+func (js *jsContext) Publish(subj string, data []byte) (*JetStreamPublishAck, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	resp, err := js.nc.RequestWithContext(ctx, subj, data)
+	if err != nil {
+		return nil, err
+	}
+
+	ack, err := ParsePublishAck(resp.Data)
+	if err != nil {
+		return nil, err
+	}
+
+	if ack.Stream == "" || ack.Sequence == 0 {
+		return nil, ErrInvalidJSAck
+	}
+
+	if ack.Stream != js.opts.StreamName {
+		return nil, fmt.Errorf("received ack from stream %q", ack.Stream)
+	}
+
+	return ack, nil
+}
+
+// Subscribe is like nats.Subscribe.
+func (js *jsContext) Subscribe(subj string, cb MsgHandler) (*Subscription, error) {
+	sub, err := js.nc.subscribe(subj, _EMPTY_, cb, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we get a consumer config, then make API request to create or update.
+	jsconf := js.opts.ConsumerConfig
+	if jsconf != nil {
+		cresp, err := js.createConsumer(subj, jsconf)
+		if err != nil {
+			sub.Unsubscribe()
+			return nil, err
+		}
+
+		// Fill in the response about the consumer info config.
+		sub.ConsumerConfig = &cresp.ConsumerInfo.Config
+	}
+	return sub, nil
+}
+
+func (js *jsContext) SubscribeSync(subj string) (*Subscription, error) {
+	if js.nc == nil {
+		return nil, ErrInvalidConnection
+	}
+	mch := make(chan *Msg, js.nc.Opts.SubChanLen)
+	sub, err := js.nc.subscribe(subj, _EMPTY_, nil, mch, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we get a consumer config, then make API request to create or update.
+	jsconf := js.opts.ConsumerConfig
+	if jsconf != nil {
+		cresp, err := js.createConsumer(subj, jsconf)
+		if err != nil {
+			sub.Unsubscribe()
+			return nil, err
+		}
+
+		// Fill in the response about the consumer info config.
+		sub.ConsumerConfig = &cresp.ConsumerInfo.Config
+	}
+
+	return sub, nil
+}
+
+func (js *jsContext) createConsumer(deliverySubject string, jsconf *jetstream.ConsumerConfig) (*jSApiConsumerCreateResponse, error) {
+	consumer := &ConsumerConfig{
+		Durable:         jsconf.Durable,
+		DeliverPolicy:   DeliverPolicy(jsconf.DeliverPolicy),
+		OptStartSeq:     jsconf.OptStartSeq,
+		OptStartTime:    jsconf.OptStartTime,
+		AckPolicy:       AckPolicy(jsconf.AckPolicy),
+		AckWait:         jsconf.AckWait,
+		MaxDeliver:      jsconf.MaxDeliver,
+		FilterSubject:   jsconf.FilterSubject,
+		ReplayPolicy:    ReplayPolicy(jsconf.ReplayPolicy),
+		SampleFrequency: jsconf.SampleFrequency,
+		RateLimit:       jsconf.RateLimit,
+		MaxAckPending:   jsconf.MaxAckPending,
+	}
+	crj, err := json.Marshal(&jSApiConsumerCreateRequest{
+		Stream: js.opts.StreamName,
+		Config: consumerConfig{
+			DeliverSubject: deliverySubject,
+			ConsumerConfig: consumer,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	var subj string
+	switch len(consumer.Durable) {
+	case 0:
+		subj = fmt.Sprintf(jSApiConsumerCreateT, js.opts.StreamName)
+	default:
+		subj = fmt.Sprintf(jSApiDurableCreateT, js.opts.StreamName, consumer.Durable)
+	}
+
+	resp, err := js.nc.RequestWithContext(ctx, subj, crj)
+	if err != nil {
+		return nil, err
+	}
+
+	cresp := &jSApiConsumerCreateResponse{}
+	err = json.Unmarshal(resp.Data, cresp)
+	if err != nil {
+		return nil, err
+	}
+
+	if cresp.Error != nil {
+		return nil, cresp.Error
+	}
+
+	return cresp, nil
+}
+
+const JSApiRequestNext = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
+
+func (js *jsContext) NextMsg(duration time.Duration) (*Msg, error) {
+	if js.opts.ConsumerConfig == nil || js.opts.ConsumerConfig.Durable == "" {
+		return nil, errors.New("nats: missing durable name for pull consumer")
+	}
+
+	sub, err := js.nc.SubscribeSync(NewInbox())
+	if err != nil {
+		return nil, err
+	}
+	sub.AutoUnsubscribe(1)
+	subj := fmt.Sprintf(api.JSApiRequestNextT, js.opts.StreamName, js.opts.ConsumerConfig.Durable)
+	err = js.nc.PublishRequest(subj, sub.Subject, nil)
+	if err != nil {
+		return nil, err
+	}
+	msg, err := sub.NextMsg(duration)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
 
 // JetStreamMsgMetaData is metadata related to a JetStream originated message
 type JetStreamMsgMetaData struct {

@@ -15,6 +15,7 @@ package nats
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func startJetStream(t *testing.T) (*server.Server, *server.Stream, *server.Consumer, *Conn) {
@@ -69,7 +71,8 @@ func startJetStream(t *testing.T) (*server.Server, *server.Stream, *server.Consu
 		t.Fatalf("consumer create failed: %s", err)
 	}
 
-	nc, err := Connect(srv.ClientURL(), UseOldRequestStyle())
+	// nc, err := Connect(srv.ClientURL(), UseOldRequestStyle())
+	nc, err := Connect(srv.ClientURL())
 	if err != nil {
 		t.Fatalf("connect failed: %v", err)
 	}
@@ -366,5 +369,115 @@ func TestMsg_AckNext(t *testing.T) {
 
 	if cons.Info().AckFloor.Stream != 1 {
 		t.Fatalf("first message was not acked")
+	}
+}
+
+func TestJetStreamContext_Publish(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	// Possible to add the publish options on the context.
+	js, err := nc.JetStream(jetstream.Stream("TEST"), jetstream.PublishStreamTimeout(time.Second))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+	ack, err := js.Publish("js.in.test", []byte("hello"))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+	if ack.Stream != "TEST" {
+		t.Fatalf("unexpected stream name: %v", err)
+	}
+
+	js, err = nc.JetStream(jetstream.Stream("OTHER"), jetstream.PublishStreamTimeout(time.Second))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	// Should get an error since `js.in.test` maps to stream TEST not OTHER.
+	ack, err = js.Publish("js.in.test", []byte("world"))
+	if err == nil {
+		t.Fatalf("expected an error but got none")
+	}
+	if err.Error() != `received ack from stream "TEST"` {
+		t.Fatalf("expected wrong stream error, got: %q", err)
+	}
+}
+
+func TestJetStreamContext_Subscribe(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	// Possible to add the publish options on the context.
+	cfg := &jetstream.ConsumerConfig{
+		Durable:       "nats",
+		DeliverPolicy: jetstream.DeliverAll,
+		AckPolicy:     jetstream.AckExplicit,
+		AckWait:       5 * time.Second,
+		ReplayPolicy:  jetstream.ReplayInstant,
+	}
+
+	js, err := nc.JetStream(jetstream.Stream("TEST"), jetstream.Consumer(cfg))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen := 0
+	inbox := NewInbox()
+	sub, err := js.Subscribe(inbox, func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 20 {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != 20 {
+		t.Fatalf("Expected 20 messages got %d", seen)
+	}
+}
+
+func TestJetStreamContext_PullSubscriber(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	js, err := nc.JetStream(
+		jetstream.Stream("TEST"),
+		jetstream.Consumer(&jetstream.ConsumerConfig{Durable: "PULL"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only for pull based consumers.
+	msg, err := js.NextMsg(1 * time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := string(msg.Data)
+	expected := "msg 1"
+	if got != expected {
+		t.Fatalf("expected %s, got: %q", expected, got)
+	}
+
+	js, err = nc.JetStream(jetstream.Stream("TEST"))
+	_, err = js.NextMsg(1 * time.Second)
+	if err == nil {
+		t.Fatalf("expected error fetching message")
 	}
 }
