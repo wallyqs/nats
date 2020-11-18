@@ -20,16 +20,18 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
-	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // JetStream enhances the client with JetStream functionality.
 func (nc *Conn) JetStream(fopts ...jetstream.Option) (*jsContext, error) {
 	var err error
-	opts := &jetstream.Options{}
+	opts := &jetstream.Options{
+		PublishStreamTimeout: 2 * time.Second,
+	}
 	for _, f := range fopts {
 		if err = f(opts); err != nil {
 			return nil, err
@@ -46,11 +48,17 @@ func (nc *Conn) JetStream(fopts ...jetstream.Option) (*jsContext, error) {
 type jsContext struct {
 	nc   *Conn
 	opts *jetstream.Options
+	mu   sync.Mutex
 }
 
-// Publish is like nats.Publish but also returns the ack response.
+// Publish makes a publish to JetStream returning the ack response.
 func (js *jsContext) Publish(subj string, data []byte) (*JetStreamPublishAck, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	js.mu.Lock()
+	timeout := js.opts.PublishStreamTimeout
+	streamName := js.opts.StreamName
+	js.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	resp, err := js.nc.RequestWithContext(ctx, subj, data)
@@ -67,24 +75,52 @@ func (js *jsContext) Publish(subj string, data []byte) (*JetStreamPublishAck, er
 		return nil, ErrInvalidJSAck
 	}
 
-	if ack.Stream != js.opts.StreamName {
+	// If we explicitly set a stream name, error in case
+	// we get an ACK from a different one.
+	if streamName != "" && ack.Stream != streamName {
 		return nil, fmt.Errorf("received ack from stream %q", ack.Stream)
 	}
 
 	return ack, nil
 }
 
-// Subscribe is like nats.Subscribe.
-func (js *jsContext) Subscribe(subj string, cb MsgHandler) (*Subscription, error) {
-	sub, err := js.nc.subscribe(subj, _EMPTY_, cb, nil, false)
+// Subscribe creates an ephemeral push based consumer.
+func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Option) (*Subscription, error) {
+	js.mu.Lock()
+	jsconf := js.opts.ConsumerConfig
+	js.mu.Unlock()
+
+	if jsconf == nil {
+		// Default config for an ephemeral push based config
+		// in case there is none already in the JetStream context.
+		opts := &jetstream.Options{
+			ConsumerConfig: &jetstream.ConsumerConfig{
+				DeliverPolicy: jetstream.DeliverAll,
+				AckPolicy:     jetstream.AckExplicit,
+				AckWait:       5 * time.Second,
+				ReplayPolicy:  jetstream.ReplayInstant,
+			},
+		}
+		for _, f := range fopts {
+			if err := f(opts); err != nil {
+				return nil, err
+			}
+		}
+		jsconf = opts.ConsumerConfig
+	}
+
+	// We need a delivery subject for push based consumers, so we create
+	// an inbox to represent that interest and bind the callback in the client.
+	deliverySubject := NewInbox()
+	sub, err := js.nc.subscribe(deliverySubject, _EMPTY_, cb, nil, false)
 	if err != nil {
 		return nil, err
 	}
 
 	// If we get a consumer config, then make API request to create or update.
-	jsconf := js.opts.ConsumerConfig
 	if jsconf != nil {
-		cresp, err := js.createConsumer(subj, jsconf)
+		jsconf.FilterSubject = subj
+		cresp, err := js.createConsumer(deliverySubject, jsconf)
 		if err != nil {
 			sub.Unsubscribe()
 			return nil, err
@@ -179,9 +215,10 @@ func (js *jsContext) createConsumer(deliverySubject string, jsconf *jetstream.Co
 
 const JSApiRequestNext = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
 
+// NextMsg retrieves the next message for a pull based consumer.
 func (js *jsContext) NextMsg(duration time.Duration) (*Msg, error) {
 	if js.opts.ConsumerConfig == nil || js.opts.ConsumerConfig.Durable == "" {
-		return nil, errors.New("nats: missing durable name for pull consumer")
+		return nil, errors.New("nats: missing durable name in ConsumerConfig")
 	}
 
 	sub, err := js.nc.SubscribeSync(NewInbox())
@@ -189,7 +226,7 @@ func (js *jsContext) NextMsg(duration time.Duration) (*Msg, error) {
 		return nil, err
 	}
 	sub.AutoUnsubscribe(1)
-	subj := fmt.Sprintf(api.JSApiRequestNextT, js.opts.StreamName, js.opts.ConsumerConfig.Durable)
+	subj := fmt.Sprintf(JSApiRequestNext, js.opts.StreamName, js.opts.ConsumerConfig.Durable)
 	err = js.nc.PublishRequest(subj, sub.Subject, nil)
 	if err != nil {
 		return nil, err

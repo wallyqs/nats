@@ -71,12 +71,12 @@ func startJetStream(t *testing.T) (*server.Server, *server.Stream, *server.Consu
 		t.Fatalf("consumer create failed: %s", err)
 	}
 
-	// nc, err := Connect(srv.ClientURL(), UseOldRequestStyle())
-	nc, err := Connect(srv.ClientURL())
+	nc, err := Connect(srv.ClientURL(), UseOldRequestStyle())
 	if err != nil {
 		t.Fatalf("connect failed: %v", err)
 	}
 
+	// TEST stream publishes
 	for i := 1; i <= 20; i++ {
 		err := nc.Publish("js.in.test", []byte(fmt.Sprintf("msg %d", i)), PublishExpectsStream("TEST"))
 		if err != nil {
@@ -406,15 +406,81 @@ func TestJetStreamContext_Publish(t *testing.T) {
 	}
 }
 
+func TestJetStreamContext_PublishNoAPIAccess(t *testing.T) {
+	// Creates the TEST stream.
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	_, err := srv.GlobalAccount().AddStream(&server.StreamConfig{
+		Name:     "ANOTHER",
+		Subjects: []string{"another.stream"},
+		Storage:  server.MemoryStorage,
+	})
+	if err != nil {
+		t.Fatalf("stream create failed: %v", err)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	// Publish implicitly to the TEST stream.
+	ack, err := js.Publish("js.in.test", []byte("hello"))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+	if ack.Stream != "TEST" {
+		t.Fatalf("unexpected stream name: %v", err)
+	}
+	got := ack.Sequence
+	expected := 21
+	if got != expected {
+		t.Fatalf("expected %d, got: %d", expected, got)
+	}
+
+	// Publish implicitly to ANOTHER stream.
+	ack, err = js.Publish("another.stream", []byte("hello world"))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+	if ack.Stream != "ANOTHER" {
+		t.Fatalf("unexpected stream name: %v", err)
+	}
+	got = ack.Sequence
+	expected = 1
+	if got != expected {
+		t.Fatalf("expected %d, got: %d", expected, got)
+	}
+
+	// Explicitly binding to a different stream causes an error
+	// if the response comes from another stream.
+	js2, err := nc.JetStream(jetstream.Stream("OTHER"))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	// Should get an error since `js.in.test` maps to stream TEST not OTHER.
+	ack, err = js2.Publish("js.in.test", []byte("world"))
+	if err == nil {
+		t.Fatalf("expected an error but got none")
+	}
+	if err.Error() != `received ack from stream "TEST"` {
+		t.Fatalf("expected wrong stream error, got: %q", err)
+	}
+}
+
 func TestJetStreamContext_Subscribe(t *testing.T) {
 	srv, _, _, nc := startJetStream(t)
 	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
 	defer srv.Shutdown()
 	defer nc.Close()
 
-	// Possible to add the publish options on the context.
 	cfg := &jetstream.ConsumerConfig{
-		Durable:       "nats",
+		// NOTE: Subscribe is only for ephemeral consumers.
+		// Durable:       "nats",
 		DeliverPolicy: jetstream.DeliverAll,
 		AckPolicy:     jetstream.AckExplicit,
 		AckWait:       5 * time.Second,
@@ -430,8 +496,123 @@ func TestJetStreamContext_Subscribe(t *testing.T) {
 	defer cancel()
 
 	seen := 0
-	inbox := NewInbox()
-	sub, err := js.Subscribe(inbox, func(m *Msg) {
+
+	// NOTE: Inbox becomes the delivery subject
+	sub, err := js.Subscribe("js.in.test", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 20 {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != 20 {
+		t.Fatalf("Expected 20 messages got %d", seen)
+	}
+}
+
+func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	_, err := srv.GlobalAccount().AddStream(&server.StreamConfig{
+		Name:     "MULTISUBJECT",
+		Subjects: []string{"js.test.one", "js.test.two", "js.test.three"},
+		Storage:  server.MemoryStorage,
+	})
+	if err != nil {
+		t.Fatalf("stream create failed: %v", err)
+	}
+
+	nc.Publish("js.test.one", []byte("1"))
+	nc.Publish("js.test.two", []byte("2"))
+	nc.Publish("js.test.three", []byte("3"))
+	nc.Publish("js.test.three", []byte("33"))
+	nc.Publish("js.test.two", []byte("22"))
+	nc.Publish("js.test.one", []byte("11"))
+	
+	cfg := &jetstream.ConsumerConfig{
+		DeliverPolicy: jetstream.DeliverAll,
+		AckPolicy:     jetstream.AckExplicit,
+		AckWait:       5 * time.Second,
+		ReplayPolicy:  jetstream.ReplayInstant,
+	}
+
+	js, err := nc.JetStream(jetstream.Stream("MULTISUBJECT"), jetstream.Consumer(cfg))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	// Get the messages from all subjects belonging to the MULTISUBJECT stream.
+	seen := 0
+	expected := 6
+	sub, err := js.Subscribe("js.test.*", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == expected {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != expected {
+		t.Fatalf("Expected %d messages got %d", expected, seen)
+	}
+
+	// Narrow down to single subject.
+	seen = 0
+	expected = 2
+	sub2, err := js.Subscribe("js.test.two", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == expected {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub2.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != expected {
+		t.Fatalf("Expected %d messages got %d", expected, seen)
+	}
+}
+
+func TestJetStreamContext_SubscribeNoAPIAccess(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	js, err := nc.JetStream(jetstream.Stream("TEST"))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen := 0
+	sub, err := js.Subscribe("js.in.test", func(m *Msg) {
 		m.Ack()
 		seen++
 		if seen == 20 {
