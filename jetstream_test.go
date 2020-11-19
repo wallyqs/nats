@@ -516,6 +516,98 @@ func TestJetStreamContext_Subscribe(t *testing.T) {
 	}
 }
 
+func TestJetStreamContext_DurableSubscribe(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	consumer := jetstream.Consumer(&jetstream.ConsumerConfig{
+		Durable:       "nats:1",
+		DeliverPolicy: jetstream.DeliverAll,
+		AckPolicy:     jetstream.AckExplicit,
+		AckWait:       5 * time.Second,
+		ReplayPolicy:  jetstream.ReplayInstant,
+	})
+
+	js, err := nc.JetStream(jetstream.Stream("TEST"), consumer)
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen := 0
+
+	sub, err := js.Subscribe("js.in.test", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 20 {
+			cancel()
+		}
+	})
+
+	ods := jetstream.DeliverySubject(sub.Subject)
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != 20 {
+		t.Fatalf("Expected 20 messages got %d", seen)
+	}
+	nc.Drain()
+
+	// Reconnect and reuse durable with same DeliverySubject
+	nc2, err := Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatalf("connect failed: %v", err)
+	}
+	defer nc2.Close()
+
+	nc.Publish("js.in.test", []byte("msg 21"))
+	nc.Publish("js.in.test", []byte("msg 22"))
+
+	js2, err := nc2.JetStream()
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen = 0
+	consumer2 := jetstream.Consumer(&jetstream.ConsumerConfig{
+		Durable:       "nats:1",
+		DeliverPolicy: jetstream.DeliverAll,
+		AckPolicy:     jetstream.AckExplicit,
+		AckWait:       5 * time.Second,
+		ReplayPolicy:  jetstream.ReplayInstant,
+	})
+	sub2, err := js2.Subscribe("js.in.test", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 2 {
+			cancel()
+		}
+	}, jetstream.Stream("TEST"), consumer2, ods)
+	if sub2.Subject != sub.Subject {
+		t.Fatalf("expected %s, got: %s", sub.Subject, sub2.Subject)
+	}
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+
+	<-ctx.Done()
+
+	if seen != 2 {
+		t.Fatalf("Expected 2 messages got %d", seen)
+	}
+}
+
 func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	srv, _, _, nc := startJetStream(t)
 	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
@@ -523,20 +615,22 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	defer nc.Close()
 
 	_, err := srv.GlobalAccount().AddStream(&server.StreamConfig{
-		Name:     "MULTISUBJECT",
-		Subjects: []string{"js.test.one", "js.test.two", "js.test.three"},
+		Name: "MULTISUBJECT",
+		Subjects: []string{"jsm.dev.*", "jsm.test.*", "jsm.prod.*"},
 		Storage:  server.MemoryStorage,
 	})
 	if err != nil {
 		t.Fatalf("stream create failed: %v", err)
 	}
 
-	nc.Publish("js.test.one", []byte("1"))
-	nc.Publish("js.test.two", []byte("2"))
-	nc.Publish("js.test.three", []byte("3"))
-	nc.Publish("js.test.three", []byte("33"))
-	nc.Publish("js.test.two", []byte("22"))
-	nc.Publish("js.test.one", []byte("11"))
+	nc.Publish("jsm.test.one", []byte("1"))
+	nc.Publish("jsm.test.two", []byte("2"))
+	nc.Publish("jsm.test.three", []byte("3"))
+	nc.Publish("jsm.test.three", []byte("33"))
+	nc.Publish("jsm.test.two", []byte("22"))
+	nc.Publish("jsm.test.one", []byte("11"))
+	nc.Publish("jsm.prod.one", []byte("10001"))
+	nc.Publish("jsm.prod.two", []byte("10002"))
 
 	cfg := &jetstream.ConsumerConfig{
 		DeliverPolicy: jetstream.DeliverAll,
@@ -553,10 +647,9 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
-	// Get the messages from all subjects belonging to the MULTISUBJECT stream.
 	seen := 0
 	expected := 6
-	sub, err := js.Subscribe("js.test.*", func(m *Msg) {
+	sub, err := js.Subscribe("jsm.test.*", func(m *Msg) {
 		m.Ack()
 		seen++
 		if seen == expected {
@@ -566,7 +659,34 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create failed: %s", err)
 	}
-	defer sub.Unsubscribe()
+	sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != expected {
+		t.Fatalf("Expected %d messages got %d", expected, seen)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	// Using empty string means that filter subject is empty so fetches all.
+	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	seen = 0
+	expected = 8
+	sub, err = js.Subscribe("", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == expected {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	sub.Unsubscribe()
 
 	<-ctx.Done()
 
@@ -577,7 +697,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	// Narrow down to single subject.
 	seen = 0
 	expected = 2
-	sub2, err := js.Subscribe("js.test.two", func(m *Msg) {
+	sub, err = js.Subscribe("jsm.test.two", func(m *Msg) {
 		m.Ack()
 		seen++
 		if seen == expected {
@@ -587,7 +707,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create failed: %s", err)
 	}
-	defer sub2.Unsubscribe()
+	sub.Unsubscribe()
 
 	<-ctx.Done()
 
@@ -636,7 +756,7 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 	defer srv.Shutdown()
 	defer nc.Close()
 
-	js, err := nc.JetStream(
+	sub, err := nc.JetStream(
 		jetstream.Stream("TEST"),
 		jetstream.Consumer(&jetstream.ConsumerConfig{Durable: "PULL"}),
 	)
@@ -645,7 +765,7 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 	}
 
 	// Only for pull based consumers.
-	msg, err := js.NextMsg(1 * time.Second)
+	msg, err := sub.NextMsg(1 * time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -655,8 +775,8 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 		t.Fatalf("expected %s, got: %q", expected, got)
 	}
 
-	js, err = nc.JetStream(jetstream.Stream("TEST"))
-	_, err = js.NextMsg(1 * time.Second)
+	sub, err = nc.JetStream(jetstream.Stream("TEST"))
+	_, err = sub.NextMsg(1 * time.Second)
 	if err == nil {
 		t.Fatalf("expected error fetching message")
 	}

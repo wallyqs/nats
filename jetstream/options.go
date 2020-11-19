@@ -10,6 +10,7 @@ type Options struct {
 	StreamName           string
 	PublishStreamTimeout time.Duration
 	ConsumerConfig       *ConsumerConfig
+	DeliverySubject      string
 }
 
 func Stream(name string) func(opts *Options) error {
@@ -29,6 +30,13 @@ func PublishStreamTimeout(timeout time.Duration) func(opts *Options) error {
 func Consumer(cfg *ConsumerConfig) func(opts *Options) error {
 	return func(opts *Options) error {
 		opts.ConsumerConfig = cfg
+		return nil
+	}
+}
+
+func DeliverySubject(name string) func(opts *Options) error {
+	return func(opts *Options) error {
+		opts.DeliverySubject = name
 		return nil
 	}
 }

@@ -117,6 +117,7 @@ func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Op
 	}
 
 	// Allow customizing/overriding via options as well.
+	var deliverySubject string
 	if len(fopts) > 0 {
 		opts := &jetstream.Options{
 			ConsumerConfig: jsconf,
@@ -129,11 +130,14 @@ func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Op
 		}
 		jsconf = opts.ConsumerConfig
 		streamName = opts.StreamName
+		deliverySubject = opts.DeliverySubject
 	}
 
 	// We need a delivery subject for push based consumers, so we create
 	// an inbox to represent that interest and bind the callback in the client.
-	deliverySubject := NewInbox()
+	if deliverySubject == "" {
+		deliverySubject = NewInbox()
+	}
 	sub, err := js.nc.subscribe(deliverySubject, _EMPTY_, cb, nil, false)
 	if err != nil {
 		return nil, err
