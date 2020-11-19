@@ -497,7 +497,6 @@ func TestJetStreamContext_Subscribe(t *testing.T) {
 
 	seen := 0
 
-	// NOTE: Inbox becomes the delivery subject
 	sub, err := js.Subscribe("js.in.test", func(m *Msg) {
 		m.Ack()
 		seen++
@@ -538,7 +537,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	nc.Publish("js.test.three", []byte("33"))
 	nc.Publish("js.test.two", []byte("22"))
 	nc.Publish("js.test.one", []byte("11"))
-	
+
 	cfg := &jetstream.ConsumerConfig{
 		DeliverPolicy: jetstream.DeliverAll,
 		AckPolicy:     jetstream.AckExplicit,
@@ -597,7 +596,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	}
 }
 
-func TestJetStreamContext_SubscribeNoAPIAccess(t *testing.T) {
+func TestJetStreamContext_SubscribeDefaultEphemeralConsumer(t *testing.T) {
 	srv, _, _, nc := startJetStream(t)
 	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
 	defer srv.Shutdown()
@@ -660,5 +659,123 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 	_, err = js.NextMsg(1 * time.Second)
 	if err == nil {
 		t.Fatalf("expected error fetching message")
+	}
+}
+
+func TestJetStreamContext_PublishSubscribe(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	_, err := srv.GlobalAccount().AddStream(&server.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo"},
+		Storage:  server.MemoryStorage,
+	})
+	if err != nil {
+		t.Fatalf("stream create failed: %v", err)
+	}
+
+	js, err := nc.JetStream(jetstream.Stream("FOO"))
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		ack, err := js.Publish("foo", []byte("hello world"))
+		if err != nil {
+			t.Errorf("Unexpected error publishing to stream: %s", err)
+		}
+		if ack.Stream != "FOO" {
+			t.Errorf("Unexpected ack from stream %s:", ack.Stream)
+		}
+
+		got := ack.Sequence
+		expected := i + 1
+		if got != expected {
+			t.Errorf("expected %d, got: %d", expected, got)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen := 0
+	sub, err := js.Subscribe("foo", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 20 {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != 20 {
+		t.Fatalf("Expected 20 messages got %d", seen)
+	}
+}
+
+func TestJetStreamContext_PublishSubscribeOptions(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	_, err := srv.GlobalAccount().AddStream(&server.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo"},
+		Storage:  server.MemoryStorage,
+	})
+	if err != nil {
+		t.Fatalf("stream create failed: %v", err)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		ack, err := js.Publish("foo", []byte("hello world"), jetstream.Stream("FOO"))
+		if err != nil {
+			t.Errorf("Unexpected error publishing to stream: %s", err)
+		}
+		if ack.Stream != "FOO" {
+			t.Errorf("Unexpected ack from stream %s:", ack.Stream)
+		}
+
+		got := ack.Sequence
+		expected := i + 1
+		if got != expected {
+			t.Errorf("expected %d, got: %d", expected, got)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen := 0
+	sub, err := js.Subscribe("foo", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 20 {
+			cancel()
+		}
+	}, jetstream.Stream("FOO"))
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != 20 {
+		t.Fatalf("Expected 20 messages got %d", seen)
 	}
 }

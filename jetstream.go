@@ -52,11 +52,25 @@ type jsContext struct {
 }
 
 // Publish makes a publish to JetStream returning the ack response.
-func (js *jsContext) Publish(subj string, data []byte) (*JetStreamPublishAck, error) {
+func (js *jsContext) Publish(subj string, data []byte, fopts ...jetstream.Option) (*JetStreamPublishAck, error) {
 	js.mu.Lock()
 	timeout := js.opts.PublishStreamTimeout
 	streamName := js.opts.StreamName
 	js.mu.Unlock()
+
+	if len(fopts) > 0 {
+		o := &jetstream.Options{
+			PublishStreamTimeout: timeout,
+			StreamName:           streamName,
+		}
+		for _, f := range fopts {
+			if err := f(o); err != nil {
+				return nil, err
+			}
+		}
+		timeout = o.PublishStreamTimeout
+		streamName = o.StreamName
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -88,18 +102,25 @@ func (js *jsContext) Publish(subj string, data []byte) (*JetStreamPublishAck, er
 func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Option) (*Subscription, error) {
 	js.mu.Lock()
 	jsconf := js.opts.ConsumerConfig
+	streamName := js.opts.StreamName
 	js.mu.Unlock()
 
 	if jsconf == nil {
 		// Default config for an ephemeral push based config
 		// in case there is none already in the JetStream context.
+		jsconf = &jetstream.ConsumerConfig{
+			DeliverPolicy: jetstream.DeliverAll,
+			AckPolicy:     jetstream.AckExplicit,
+			AckWait:       5 * time.Second,
+			ReplayPolicy:  jetstream.ReplayInstant,
+		}
+	}
+
+	// Allow customizing/overriding via options as well.
+	if len(fopts) > 0 {
 		opts := &jetstream.Options{
-			ConsumerConfig: &jetstream.ConsumerConfig{
-				DeliverPolicy: jetstream.DeliverAll,
-				AckPolicy:     jetstream.AckExplicit,
-				AckWait:       5 * time.Second,
-				ReplayPolicy:  jetstream.ReplayInstant,
-			},
+			ConsumerConfig: jsconf,
+			StreamName:     streamName,
 		}
 		for _, f := range fopts {
 			if err := f(opts); err != nil {
@@ -107,6 +128,7 @@ func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Op
 			}
 		}
 		jsconf = opts.ConsumerConfig
+		streamName = opts.StreamName
 	}
 
 	// We need a delivery subject for push based consumers, so we create
@@ -120,7 +142,7 @@ func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Op
 	// If we get a consumer config, then make API request to create or update.
 	if jsconf != nil {
 		jsconf.FilterSubject = subj
-		cresp, err := js.createConsumer(deliverySubject, jsconf)
+		cresp, err := js.createConsumer(streamName, deliverySubject, jsconf)
 		if err != nil {
 			sub.Unsubscribe()
 			return nil, err
@@ -132,33 +154,7 @@ func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Op
 	return sub, nil
 }
 
-func (js *jsContext) SubscribeSync(subj string) (*Subscription, error) {
-	if js.nc == nil {
-		return nil, ErrInvalidConnection
-	}
-	mch := make(chan *Msg, js.nc.Opts.SubChanLen)
-	sub, err := js.nc.subscribe(subj, _EMPTY_, nil, mch, true)
-	if err != nil {
-		return nil, err
-	}
-
-	// If we get a consumer config, then make API request to create or update.
-	jsconf := js.opts.ConsumerConfig
-	if jsconf != nil {
-		cresp, err := js.createConsumer(subj, jsconf)
-		if err != nil {
-			sub.Unsubscribe()
-			return nil, err
-		}
-
-		// Fill in the response about the consumer info config.
-		sub.ConsumerConfig = &cresp.ConsumerInfo.Config
-	}
-
-	return sub, nil
-}
-
-func (js *jsContext) createConsumer(deliverySubject string, jsconf *jetstream.ConsumerConfig) (*jSApiConsumerCreateResponse, error) {
+func (js *jsContext) createConsumer(streamName string, deliverySubject string, jsconf *jetstream.ConsumerConfig) (*jSApiConsumerCreateResponse, error) {
 	consumer := &ConsumerConfig{
 		Durable:         jsconf.Durable,
 		DeliverPolicy:   DeliverPolicy(jsconf.DeliverPolicy),
@@ -174,7 +170,7 @@ func (js *jsContext) createConsumer(deliverySubject string, jsconf *jetstream.Co
 		MaxAckPending:   jsconf.MaxAckPending,
 	}
 	crj, err := json.Marshal(&jSApiConsumerCreateRequest{
-		Stream: js.opts.StreamName,
+		Stream: streamName,
 		Config: consumerConfig{
 			DeliverSubject: deliverySubject,
 			ConsumerConfig: consumer,
@@ -190,9 +186,9 @@ func (js *jsContext) createConsumer(deliverySubject string, jsconf *jetstream.Co
 	var subj string
 	switch len(consumer.Durable) {
 	case 0:
-		subj = fmt.Sprintf(jSApiConsumerCreateT, js.opts.StreamName)
+		subj = fmt.Sprintf(jSApiConsumerCreateT, streamName)
 	default:
-		subj = fmt.Sprintf(jSApiDurableCreateT, js.opts.StreamName, consumer.Durable)
+		subj = fmt.Sprintf(jSApiDurableCreateT, streamName, consumer.Durable)
 	}
 
 	resp, err := js.nc.RequestWithContext(ctx, subj, crj)
