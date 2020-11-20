@@ -793,7 +793,7 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 	defer nc.Close()
 
 	sub, err := nc.JetStream(
-		jetstream.Stream("TEST"),
+		// jetstream.Stream("TEST"),
 		jetstream.Consumer(&jetstream.ConsumerConfig{Durable: "PULL"}),
 	)
 	if err != nil {
@@ -801,7 +801,7 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 	}
 
 	// Only for pull based consumers.
-	msg, err := sub.NextMsg(1 * time.Second)
+	msg, err := sub.NextMsg("js.in.test", 1 * time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -812,7 +812,7 @@ func TestJetStreamContext_PullSubscriber(t *testing.T) {
 	}
 
 	sub, err = nc.JetStream(jetstream.Stream("TEST"))
-	_, err = sub.NextMsg(1 * time.Second)
+	_, err = sub.NextMsg("js.in.test", 1 * time.Second)
 	if err == nil {
 		t.Fatalf("expected error fetching message")
 	}

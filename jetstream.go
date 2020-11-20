@@ -257,9 +257,37 @@ func (js *jsContext) createConsumer(streamName string, deliverySubject string, j
 const JSApiRequestNext = "$JS.API.CONSUMER.MSG.NEXT.%s.%s"
 
 // NextMsg retrieves the next message for a pull based consumer.
-func (js *jsContext) NextMsg(duration time.Duration) (*Msg, error) {
+func (js *jsContext) NextMsg(streamSubj string, duration time.Duration) (*Msg, error) {
 	if js.opts.ConsumerConfig == nil || js.opts.ConsumerConfig.Durable == "" {
 		return nil, errors.New("nats: missing durable name in ConsumerConfig")
+	}
+	streamName := js.opts.StreamName
+
+	// In case of no explicit stream, then make a lookup to find
+	// the subject since there ought not be any overlap.
+	if streamName == "" {
+		crj, err := json.Marshal(&jSApiStreamLookupRequest{streamSubj})
+		if err != nil {
+			return nil, err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		resp, err := js.nc.RequestWithContext(ctx, JSApiStreamLookup, crj)
+		if err != nil {
+			return nil, err
+		}
+
+		cresp := &jSApiStreamLookupResponse{}
+		err = json.Unmarshal(resp.Data, cresp)
+		if err != nil {
+			return nil, err
+		}
+		if cresp.Error != nil {
+			return nil, cresp.Error
+		}
+		streamName = cresp.Stream
 	}
 
 	sub, err := js.nc.SubscribeSync(NewInbox())
@@ -267,7 +295,7 @@ func (js *jsContext) NextMsg(duration time.Duration) (*Msg, error) {
 		return nil, err
 	}
 	sub.AutoUnsubscribe(1)
-	subj := fmt.Sprintf(JSApiRequestNext, js.opts.StreamName, js.opts.ConsumerConfig.Durable)
+	subj := fmt.Sprintf(JSApiRequestNext, streamName, js.opts.ConsumerConfig.Durable)
 	err = js.nc.PublishRequest(subj, sub.Subject, nil)
 	if err != nil {
 		return nil, err
