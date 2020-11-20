@@ -98,6 +98,20 @@ func (js *jsContext) Publish(subj string, data []byte, fopts ...jetstream.Option
 	return ack, nil
 }
 
+const JSApiStreamLookup = "$JS.API.STREAM.LOOKUP"
+
+type jSApiStreamLookupRequest struct {
+	// Subject finds any stream that matches this subject
+	// including those where wildcards intercepts
+	Subject string `json:"subject"`
+}
+
+type jSApiStreamLookupResponse struct {
+	jSApiResponse
+	Stream   string `json:"stream"`
+	Filtered bool   `json:"is_filtered"`
+}
+
 // Subscribe creates an ephemeral push based consumer.
 func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Option) (*Subscription, error) {
 	js.mu.Lock()
@@ -131,6 +145,33 @@ func (js *jsContext) Subscribe(subj string, cb MsgHandler, fopts ...jetstream.Op
 		jsconf = opts.ConsumerConfig
 		streamName = opts.StreamName
 		deliverySubject = opts.DeliverySubject
+	}
+
+	// In case of no explicit stream, then make a lookup to find
+	// the subject since there ought not be any overlap.
+	if streamName == "" {
+		crj, err := json.Marshal(&jSApiStreamLookupRequest{subj})
+		if err != nil {
+			return nil, err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		resp, err := js.nc.RequestWithContext(ctx, JSApiStreamLookup, crj)
+		if err != nil {
+			return nil, err
+		}
+
+		cresp := &jSApiStreamLookupResponse{}
+		err = json.Unmarshal(resp.Data, cresp)
+		if err != nil {
+			return nil, err
+		}
+		if cresp.Error != nil {
+			return nil, cresp.Error
+		}
+		streamName = cresp.Stream
 	}
 
 	// We need a delivery subject for push based consumers, so we create

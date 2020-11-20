@@ -379,7 +379,7 @@ func TestJetStreamContext_Publish(t *testing.T) {
 	defer nc.Close()
 
 	// Possible to add the publish options on the context.
-	js, err := nc.JetStream(jetstream.Stream("TEST"), jetstream.PublishStreamTimeout(time.Second))
+	js, err := nc.JetStream(jetstream.PublishStreamTimeout(time.Second))
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -487,7 +487,42 @@ func TestJetStreamContext_Subscribe(t *testing.T) {
 		ReplayPolicy:  jetstream.ReplayInstant,
 	}
 
-	js, err := nc.JetStream(jetstream.Stream("TEST"), jetstream.Consumer(cfg))
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	seen := 0
+
+	sub, err := js.Subscribe("js.in.test", func(m *Msg) {
+		m.Ack()
+		seen++
+		if seen == 20 {
+			cancel()
+		}
+	}, jetstream.Consumer(cfg))
+	if err != nil {
+		t.Fatalf("create failed: %s", err)
+	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+
+	if seen != 20 {
+		t.Fatalf("Expected 20 messages got %d", seen)
+	}
+}
+
+func TestJetStreamContext_SubscribeStreamLookup(t *testing.T) {
+	srv, _, _, nc := startJetStream(t)
+	defer os.RemoveAll(srv.JetStreamConfig().StoreDir)
+	defer srv.Shutdown()
+	defer nc.Close()
+
+	js, err := nc.JetStream()
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -530,7 +565,7 @@ func TestJetStreamContext_DurableSubscribe(t *testing.T) {
 		ReplayPolicy:  jetstream.ReplayInstant,
 	})
 
-	js, err := nc.JetStream(jetstream.Stream("TEST"), consumer)
+	js, err := nc.JetStream(consumer)
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -639,7 +674,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 		ReplayPolicy:  jetstream.ReplayInstant,
 	}
 
-	js, err := nc.JetStream(jetstream.Stream("MULTISUBJECT"), jetstream.Consumer(cfg))
+	js, err := nc.JetStream(jetstream.Consumer(cfg))
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -674,6 +709,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
+	// Fetch all the messages from all the subjects from a stream.
 	seen = 0
 	expected = 8
 	sub, err = js.Subscribe("", func(m *Msg) {
@@ -682,7 +718,7 @@ func TestJetStreamContext_SubscribeMultiSubject(t *testing.T) {
 		if seen == expected {
 			cancel()
 		}
-	})
+	}, jetstream.Stream("MULTISUBJECT"))
 	if err != nil {
 		t.Fatalf("create failed: %s", err)
 	}
@@ -722,7 +758,7 @@ func TestJetStreamContext_SubscribeDefaultEphemeralConsumer(t *testing.T) {
 	defer srv.Shutdown()
 	defer nc.Close()
 
-	js, err := nc.JetStream(jetstream.Stream("TEST"))
+	js, err := nc.JetStream()
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -797,7 +833,7 @@ func TestJetStreamContext_PublishSubscribe(t *testing.T) {
 		t.Fatalf("stream create failed: %v", err)
 	}
 
-	js, err := nc.JetStream(jetstream.Stream("FOO"))
+	js, err := nc.JetStream()
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -887,7 +923,7 @@ func TestJetStreamContext_PublishSubscribeOptions(t *testing.T) {
 		if seen == 20 {
 			cancel()
 		}
-	}, jetstream.Stream("FOO"))
+	})
 	if err != nil {
 		t.Fatalf("create failed: %s", err)
 	}
