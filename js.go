@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// "github.com/nats-io/nats.go/jetstream"
 )
 
 type Consumer interface {
@@ -49,6 +50,7 @@ type Consumer interface {
 	// JetStream Consumer
 	ConsumerInfo() (*ConsumerInfo, error)
 	Poll() error
+	DeliverySubject() string
 }
 
 // JetStream is the public interface for the JetStream context.
@@ -105,10 +107,13 @@ type AccountStats struct {
 // Internal struct for jetstream
 type js struct {
 	nc *Conn
+
 	// For importing JetStream from other accounts.
 	pre string
+
 	// Amount of time to wait for API requests (including message acknowledgements)
 	wait time.Duration
+
 	// Signals only direct access and no API access.
 	direct bool
 }
@@ -145,10 +150,12 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 		}
 	}
 
+	// Use the context without API access available.
 	if js.direct {
 		return js, nil
 	}
 
+	// If direct API access is available, fetch account info.
 	resp, err := nc.Request(js.apiSubj(JSApiAccountInfo), nil, js.wait)
 	if err != nil {
 		if err == ErrNoResponders {
@@ -191,6 +198,7 @@ func ApiRequestWait(wait time.Duration) JSOpt {
 	}
 }
 
+// DirectOnly locks the JetStream context to making any calls the API.
 func DirectOnly() JSOpt {
 	return func(js *js) error {
 		js.direct = true
@@ -489,12 +497,16 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// If we are attaching to an existing consumer.
 	shouldAttach := o.stream != _EMPTY_ && o.consumer != _EMPTY_ || o.cfg.DeliverSubject != _EMPTY_
 	shouldCreate := !shouldAttach
+	noApiAccess := js.direct
 
-	if js.direct && shouldCreate {
+	// Cannot create consumer unless there is direct API access.
+	if noApiAccess && shouldCreate {
 		return nil, ErrDirectModeRequired
 	}
 
-	if js.direct {
+	if noApiAccess {
+		// If there is no api access, then can use the PushDirect option
+		// to set one, otherwise an inbox will be created on the fly.
 		if o.cfg.DeliverSubject != _EMPTY_ {
 			deliver = o.cfg.DeliverSubject
 		} else {
@@ -732,6 +744,14 @@ type jsSub struct {
 	pull     int
 }
 
+// DeliverySubject...
+func (sub *jsSub) DeliverySubject() string {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	return sub.Subject
+}
+
+// ConsumerInfo...
 func (sub *jsSub) ConsumerInfo() (*ConsumerInfo, error) {
 	sub.mu.Lock()
 	// TODO(dlc) - Better way to mark especially if we attach.

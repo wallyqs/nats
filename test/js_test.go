@@ -351,7 +351,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	if info, _ := sub.ConsumerInfo(); info.Config.Durable != dname {
 		t.Fatalf("Expected durable name to be set to %q, got %q", dname, info.Config.Durable)
 	}
-	deliver := sub.Subject
+	deliver := sub.DeliverySubject()
 	sub.Unsubscribe()
 
 	// Create again and make sure that works and that we attach to the same durable with different delivery.
@@ -361,10 +361,10 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	if deliver == sub.Subject {
+	if deliver == sub.DeliverySubject() {
 		t.Fatalf("Expected delivery subject to be different then %q", deliver)
 	}
-	deliver = sub.Subject
+	deliver = sub.DeliverySubject()
 
 	// Now test that we can attach to an existing durable.
 	sub, err = js.SubscribeSync("foo", nats.Attach(mset.Name(), dname))
@@ -373,7 +373,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	if deliver != sub.Subject {
+	if deliver != sub.DeliverySubject() {
 		t.Fatalf("Expected delivery subject to be the same when attaching, got different")
 	}
 
@@ -584,10 +584,13 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 				exports [
 					# For the stream publish.
 					{ service: "ORDERS" }
+
 					# For the pull based consumer. Response type needed for batchsize > 1
 					{ service: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", response: stream }
+
 					# For the push based consumer delivery and ack.
 					{ stream: "p.d" }
+
 					# For the acks. Service in case we want an ack to our ack.
 					{ service: "$JS.ACK.TEST.*.>" }
 				]
@@ -647,6 +650,8 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	// Now make sure we can send to the stream.
 	toSend := 100
 	for i := 0; i < toSend; i++ {
+		// Publish messages to stream named ORDER (stream name becomes subject in this case).
+		// import: { service: { subject: "ORDERS", account: JS } , to: "orders" }
 		if _, err := js.Publish("orders", []byte(fmt.Sprintf("ORDER-%d", i+1))); err != nil {
 			t.Fatalf("Unexpected error publishing message %d: %v", i+1, err)
 		}
@@ -660,7 +665,7 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 		t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrDirectModeRequired, err)
 	}
 
-	var sub *nats.Subscription
+	var sub nats.Consumer
 
 	waitForPending := func(n int) {
 		timeout := time.Now().Add(2 * time.Second)
@@ -674,14 +679,17 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 		t.Fatalf("Expected to receive %d messages, but got %d", n, msgs)
 	}
 
-	// Do push based direct consumer.
+	// Do push based direct consumer with delivery subject `p.d'
+	// export: { stream: "p.d" }
+	// import: { stream: { subject: "p.d", account: JS } }
 	sub, err = js.SubscribeSync("ORDERS", nats.PushDirect("p.d"))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	waitForPending(toSend)
 
-	// Now pull based consumer.
+	// Now pull based consumer on stream ORDERS with durable name d1,
+	// pulling 10 msgs each time.
 	batch := 10
 	sub, err = js.SubscribeSync("ORDERS", nats.PullDirect("ORDERS", "d1", batch))
 	if err != nil {
