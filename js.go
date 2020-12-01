@@ -173,6 +173,21 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 	return js, nil
 }
 
+// JetStream client implementation when using direct mode.
+type jsDirectCtx struct {
+}
+
+// Instead of PushDirect("p.d")
+// 
+// sub, err = js.SubscribeSync("", nats.PushDirect("p.d"))
+// 
+// js.SubscribeSync("p.d")
+// 
+func (*jsDirectCtx) SubscribeSync(subj string, opts ...SubOpt) (Consumer, error) {
+	// TODO
+	return nil, nil
+}
+
 // JSOpt configures options for the jetstream context.
 type JSOpt func(opts *js) error
 
@@ -519,10 +534,11 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		}
 
 		ccfg = &info.Config
+
 		// Make sure this new subject matches or is a subset.
-		if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
-			return nil, ErrSubjectMismatch
-		}
+		// if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
+		// 	return nil, ErrSubjectMismatch
+		// }
 		if ccfg.DeliverSubject != _EMPTY_ {
 			deliver = ccfg.DeliverSubject
 		} else {
@@ -843,7 +859,7 @@ func (m *Msg) ackReply(ackType []byte, sync bool) error {
 	if m == nil {
 		return ErrInvalidMsg
 	}
-	fmt.Println("....................................", m)
+	fmt.Printf("....................................%+v\n", m)
 	js, isPullMode, err := m.checkReply()
 	if err != nil {
 		return err
