@@ -25,6 +25,10 @@ import (
 	"time"
 )
 
+type Consumer interface {
+	
+}
+
 // JetStream is the public interface for the JetStream context.
 type JetStream interface {
 	// Publishing messages to JetStream.
@@ -32,12 +36,12 @@ type JetStream interface {
 	PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error)
 
 	// Subscribing to messages in JetStream.
-	Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (*Subscription, error)
-	SubscribeSync(subj string, opts ...SubOpt) (*Subscription, error)
+	Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (Consumer, error)
+	SubscribeSync(subj string, opts ...SubOpt) (Consumer, error)
 	// Channel versions.
-	ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (*Subscription, error)
+	ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (Consumer, error)
 	// QueueSubscribe.
-	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (*Subscription, error)
+	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (Consumer, error)
 
 	// Management
 	// TODO(dlc) - add more
@@ -83,7 +87,7 @@ type js struct {
 	nc *Conn
 	// For importing JetStream from other accounts.
 	pre string
-	// Amount of time to wait for API requests.
+	// Amount of time to wait for API requests (including message acknowledgements)
 	wait time.Duration
 	// Signals only direct access and no API access.
 	direct bool
@@ -110,6 +114,7 @@ const (
 
 // JetStream returns a JetStream context for pub/sub interactions.
 func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
+	// TODO: Make Option
 	const defaultRequestWait = 5 * time.Second
 
 	js := &js{nc: nc, pre: JSDefaultApiPrefix, wait: defaultRequestWait}
@@ -144,9 +149,14 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 // JSOpt configures options for the jetstream context.
 type JSOpt func(opts *js) error
 
+// ApiPrefix allows importing a jetstream API using
+// a custom prefix.
 func ApiPrefix(pre string) JSOpt {
 	return func(js *js) error {
 		js.pre = pre
+
+		// Allow use like
+		// JetStream(nats.ApiPrefix)
 		if !strings.HasSuffix(js.pre, ".") {
 			js.pre = js.pre + "."
 		}
@@ -332,14 +342,29 @@ type JSApiCreateConsumerRequest struct {
 	Config *ConsumerConfig `json:"config"`
 }
 
+// TODO: Which of these should be js.Subscribe options?
 type ConsumerConfig struct {
 	Durable         string        `json:"durable_name,omitempty"`
+
+	// Should not be option for nats.Subscribe
 	DeliverSubject  string        `json:"deliver_subject,omitempty"`
+
+	// ?
 	DeliverPolicy   DeliverPolicy `json:"deliver_policy"`
+
+	// ?
 	OptStartSeq     uint64        `json:"opt_start_seq,omitempty"`
 	OptStartTime    *time.Time    `json:"opt_start_time,omitempty"`
+
+	// explicit | none | ?
+	// none: nats.NoAcks()
+	// AckNone | AckAll | AckExplicit
+	// TODO: Diference between AckAll vs AckExplicit
 	AckPolicy       AckPolicy     `json:"ack_policy"`
+
+	// AckWait how long for the server to wait for an ack.
 	AckWait         time.Duration `json:"ack_wait,omitempty"`
+
 	MaxDeliver      int           `json:"max_deliver,omitempty"`
 	FilterSubject   string        `json:"filter_subject,omitempty"`
 	ReplayPolicy    ReplayPolicy  `json:"replay_policy"`
@@ -383,23 +408,23 @@ type NextRequest struct {
 type SubOpt func(opts *subOpts) error
 
 // Subscribe will create a subscription to the appropriate stream and consumer.
-func (js *js) Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (*Subscription, error) {
+func (js *js) Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (Consumer, error) {
 	return js.subscribe(subj, _EMPTY_, cb, nil, opts)
 }
 
 // SubscribeSync will create a sync subscription to the appropriate stream and consumer.
-func (js *js) SubscribeSync(subj string, opts ...SubOpt) (*Subscription, error) {
+func (js *js) SubscribeSync(subj string, opts ...SubOpt) (Consumer, error) {
 	mch := make(chan *Msg, js.nc.Opts.SubChanLen)
 	return js.subscribe(subj, _EMPTY_, nil, mch, opts)
 }
 
 // QueueSubscribe will create a subscription to the appropriate stream and consumer with queue semantics.
-func (js *js) QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (*Subscription, error) {
+func (js *js) QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (Consumer, error) {
 	return js.subscribe(subj, queue, cb, nil, opts)
 }
 
 // Subscribe will create a subscription to the appropriate stream and consumer.
-func (js *js) ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (*Subscription, error) {
+func (js *js) ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (Consumer, error) {
 	return js.subscribe(subj, _EMPTY_, nil, ch, opts)
 }
 
@@ -420,7 +445,7 @@ type JSApiStreamNamesResponse struct {
 	Streams []string `json:"streams"`
 }
 
-func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*Subscription, error) {
+func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*jsSubscription, error) {
 	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
 	o := subOpts{cfg: &cfg}
 	if len(opts) > 0 {
@@ -488,7 +513,16 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// Check if we are manual ack.
 	if cb != nil && !o.mack {
 		ocb := cb
-		cb = func(m *Msg) { ocb(m); m.Ack() }
+		cb = func(m *Msg) {
+			ocb(m)
+			m.Ack()
+			// err := m.Ack()
+			// nc := js.nc
+			// if err != nil {
+			// 	// TODO: Dispatch to error callback
+			// 	nc.ach.push(func() { nc.Opts.AsyncErrorCB(nc, sub, err) })
+			// }
+		}
 	}
 
 	sub, err = js.nc.subscribe(deliver, queue, cb, ch, cb == nil)
@@ -563,12 +597,13 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	}
 
 	// If we are pull based go ahead and fire off the first request to populate.
+	jsub := &jsSubscription{sub}
 	if isPullMode {
 		sub.jsi.pull = o.pull
-		sub.Poll()
+		jsub.Poll()
 	}
 
-	return sub, nil
+	return jsub, nil
 }
 
 func (js *js) lookupStreamBySubject(subj string) (string, error) {
@@ -613,6 +648,7 @@ func Durable(name string) SubOpt {
 	}
 }
 
+// Attach binds a subscription to an already existing jetstream Consumer.
 func Attach(stream, consumer string) SubOpt {
 	return func(opts *subOpts) error {
 		opts.stream = stream
@@ -621,6 +657,7 @@ func Attach(stream, consumer string) SubOpt {
 	}
 }
 
+// Pull sets the number of messages to fetch each time when calling pull.
 func Pull(batchSize int) SubOpt {
 	return func(opts *subOpts) error {
 		if batchSize == 0 {
@@ -631,6 +668,7 @@ func Pull(batchSize int) SubOpt {
 	}
 }
 
+// PullDirect vs Attach+Pull
 func PullDirect(stream, consumer string, batchSize int) SubOpt {
 	return func(opts *subOpts) error {
 		if batchSize == 0 {
@@ -657,7 +695,13 @@ func ManualAck() SubOpt {
 	}
 }
 
-func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
+type jsSubscription struct {
+	sub *Subscription
+}
+
+func (jssub *jsSubscription) ConsumerInfo() (*ConsumerInfo, error) {
+	sub := jssub.sub
+
 	sub.mu.Lock()
 	// TODO(dlc) - Better way to mark especially if we attach.
 	if sub.jsi.consumer == _EMPTY_ {
@@ -672,7 +716,9 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 	return js.getConsumerInfo(stream, consumer)
 }
 
-func (sub *Subscription) Poll() error {
+// Poll make a fetch request
+func (jssub *jsSubscription) Poll() error {
+	sub := jssub.sub
 	sub.mu.Lock()
 	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull == 0 {
 		sub.mu.Unlock()
@@ -686,6 +732,18 @@ func (sub *Subscription) Poll() error {
 
 	req, _ := json.Marshal(&NextRequest{Batch: batch})
 	reqNext := js.apiSubj(fmt.Sprintf(JSApiRequestNextT, stream, consumer))
+
+	// Request:
+	// 
+	// SUB _INBOX.1234567 <-- sub.Subject <-- deliverySubject <-- NewInbox()
+	// +
+	// PUB foo _INBOX.1234567 <-- PublishRequest
+	// hello
+
+	// MSG _INBOX.1234567 <- response
+
+	// [[SUB _INBOX.1234567]] <-- JETSTREAM --> [[MSG foo]]
+	
 	return nc.PublishRequest(reqNext, reply, req)
 }
 
@@ -731,6 +789,10 @@ func (m *Msg) checkReply() (*js, bool, error) {
 
 // ackReply handles all acks. Will do the right thing for pull and sync mode.
 func (m *Msg) ackReply(ackType []byte, sync bool) error {
+	if m == nil {
+		return ErrInvalidMsg
+	}
+	fmt.Println("....................................", m)
 	js, isPullMode, err := m.checkReply()
 	if err != nil {
 		return err
@@ -789,10 +851,28 @@ type MsgMetaData struct {
 }
 
 func (m *Msg) MetaData() (*MsgMetaData, error) {
+	fmt.Println("MSG: >>>>>>>>>>>", m)
 	if _, _, err := m.checkReply(); err != nil {
 		return nil, err
 	}
 
+	// $JS.ACK.TEST.nats-1.1.1192.229.1606780100840254000.0
+	// 
+	// where
+	// 
+	// StreamName: TEST
+	// Durable:     nats-1
+	// Delivered:   1
+	// Stream:      1192
+	// Consumer:    229
+	// Timestamp:   1606780100840254000
+	// Pending:     0
+
+	// AckSubject:
+	// 
+	// PUB $JS.ACK.TEST.nats-0.8.263.6228.1606778513483739000.1 4
+	// +ACK
+	
 	const expectedTokens = 9
 	const btsep = '.'
 
@@ -817,6 +897,8 @@ func (m *Msg) MetaData() (*MsgMetaData, error) {
 		Timestamp: time.Unix(0, parseNum(tokens[7])),
 		Pending:   uint64(parseNum(tokens[8])),
 	}
+	fmt.Printf("??????????? tokens: %+v\n", tokens)
+	fmt.Printf("??????????? %+v\n", meta)
 
 	return meta, nil
 }
