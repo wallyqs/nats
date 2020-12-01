@@ -532,15 +532,6 @@ type Subscription struct {
 	dropped     int
 }
 
-// For JetStream subscription info.
-type jsSub struct {
-	js       *js
-	consumer string
-	stream   string
-	deliver  string
-	pull     int
-}
-
 // Msg is a structure used by Subscribers and PublishMsg().
 type Msg struct {
 	Subject string

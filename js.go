@@ -26,21 +26,41 @@ import (
 )
 
 type Consumer interface {
-	
+	NextMsg(timeout time.Duration) (*Msg, error)
+	NextMsgWithContext(ctx context.Context) (*Msg, error)
+	Unsubscribe() error
+	AutoUnsubscribe(max int) error
+	Drain() error
+	ClearMaxPending() error
+	SetPendingLimits(msgLimit, bytesLimit int) error
+
+	// Stats
+	Delivered() (int64, error)
+	Dropped() (int, error)
+	Pending() (int, int, error)
+	QueuedMsgs() (int, error) 
+
+	// Config
+	Type() SubscriptionType
+	IsValid() bool
+	MaxPending() (int, int, error)
+	PendingLimits() (int, int, error)
+
+	// JetStream Consumer
+	ConsumerInfo() (*ConsumerInfo, error)
+	Poll() error
 }
 
 // JetStream is the public interface for the JetStream context.
 type JetStream interface {
-	// Publishing messages to JetStream.
+	// Publisher
 	Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
 	PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error)
 
-	// Subscribing to messages in JetStream.
+	// Subscriber
 	Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (Consumer, error)
 	SubscribeSync(subj string, opts ...SubOpt) (Consumer, error)
-	// Channel versions.
 	ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (Consumer, error)
-	// QueueSubscribe.
 	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (Consumer, error)
 
 	// Management
@@ -326,7 +346,7 @@ func MaxWait(ttl time.Duration) PubOpt {
 	}
 }
 
-// Context sets the contect to make the call to JetStream.
+// Context sets the context to make the call to JetStream.
 func Context(ctx context.Context) PubOpt {
 	return func(opts *pubOpts) error {
 		opts.ctx = ctx
@@ -445,7 +465,8 @@ type JSApiStreamNamesResponse struct {
 	Streams []string `json:"streams"`
 }
 
-func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*jsSubscription, error) {
+func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*jsSub, error) {
+	// TODO: a
 	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
 	o := subOpts{cfg: &cfg}
 	if len(opts) > 0 {
@@ -597,7 +618,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	}
 
 	// If we are pull based go ahead and fire off the first request to populate.
-	jsub := &jsSubscription{sub}
+	jsub := &jsSub{Subscription:sub}
 	if isPullMode {
 		sub.jsi.pull = o.pull
 		jsub.Poll()
@@ -668,19 +689,24 @@ func Pull(batchSize int) SubOpt {
 	}
 }
 
-// PullDirect vs Attach+Pull
+// PullDirect binds a subscription to an already existing jetstream Consumer
+// and sets the number of messages to fetch each time when calling pull.
 func PullDirect(stream, consumer string, batchSize int) SubOpt {
 	return func(opts *subOpts) error {
-		if batchSize == 0 {
-			return errors.New("nats: batch size of 0 not valid")
+		attach := Attach(stream, consumer)
+		pull := Pull(batchSize)
+		
+		if err := attach(opts); err != nil {
+			return err
 		}
-		opts.stream = stream
-		opts.consumer = consumer
-		opts.pull = batchSize
+		if err := pull(opts); err != nil {
+			return err
+		}
 		return nil
 	}
 }
 
+// PushDirect sets the deliver subject from a consumer.
 func PushDirect(deliverSubject string) SubOpt {
 	return func(opts *subOpts) error {
 		opts.cfg.DeliverSubject = deliverSubject
@@ -695,15 +721,21 @@ func ManualAck() SubOpt {
 	}
 }
 
-type jsSubscription struct {
-	sub *Subscription
+// For JetStream subscription info.
+type jsSub struct {
+	*Subscription
+	js       *js
+	// sub.jsi
+	consumer string
+	stream   string
+	deliver  string
+	pull     int
 }
 
-func (jssub *jsSubscription) ConsumerInfo() (*ConsumerInfo, error) {
-	sub := jssub.sub
-
+func (sub *jsSub) ConsumerInfo() (*ConsumerInfo, error) {
 	sub.mu.Lock()
 	// TODO(dlc) - Better way to mark especially if we attach.
+	// TODO(wallyqs) - New type for the subscriptions?
 	if sub.jsi.consumer == _EMPTY_ {
 		sub.mu.Unlock()
 		return nil, ErrTypeSubscription
@@ -717,8 +749,7 @@ func (jssub *jsSubscription) ConsumerInfo() (*ConsumerInfo, error) {
 }
 
 // Poll make a fetch request
-func (jssub *jsSubscription) Poll() error {
-	sub := jssub.sub
+func (sub *jsSub) Poll() error {
 	sub.mu.Lock()
 	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull == 0 {
 		sub.mu.Unlock()
