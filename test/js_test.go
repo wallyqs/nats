@@ -431,8 +431,9 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 
 	// TODO: is bar needed here?
-	// sub, err = js.SubscribeSync("bar", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
-	sub, err = js.SubscribeSync("", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
+	sub, err = js.SubscribeSync("bar", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
+	// sub, err = js.SubscribeSync("", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
+	// sub, err = js.SubscribeSync("rip", nats.StreamName(mset.Name()), nats.Pull(batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -527,6 +528,7 @@ func TestJetStreamImport(t *testing.T) {
 				users: [ {user: rip, password: bar} ]
 				imports [
 					{ service: { subject: "$JS.API.>", account: JS } , to: "dlc.>" }
+                                        # { workqueue: { subject: "ORDERS.d1", account: JS } , to: "orders.d1" }
 					{ service: { subject: "foo", account: JS } }
 				]
 			},
@@ -598,12 +600,22 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 					# For the acks. Service in case we want an ack to our ack.
 					{ service: "$JS.ACK.TEST.*.>" }
 				]
-			},
+			}
+
+			# Account U imports the streams and consumers created in the JS account.
 			U: {
 				users: [ {user: rip, password: bar} ]
 				imports [
 					{ service: { subject: "ORDERS", account: JS } , to: "orders" }
-					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS } }
+
+					# Pull based consumer
+					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS }, to: "next.order" }
+					# { service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS } }
+
+                                        # $JS.API.CONSUMER.MSG.NEXT
+					# { workqueue: { subject: "ORDERS.d1", account: JS } }
+
+					# Push based consumer (d2)
 					{ stream: { subject: "p.d", account: JS } }
 				]
 			},
@@ -627,14 +639,21 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	defer mset.Delete()
 
 	// Create a pull based consumer.
-	o1, err := mset.AddConsumer(&server.ConsumerConfig{Durable: "d1", AckPolicy: server.AckExplicit})
+	o1, err := mset.AddConsumer(&server.ConsumerConfig{
+		Durable: "d1",
+		AckPolicy: server.AckExplicit,
+	})
 	if err != nil {
 		t.Fatalf("pull consumer create failed: %v", err)
 	}
 	defer o1.Delete()
 
 	// Create a push based consumer.
-	o2, err := mset.AddConsumer(&server.ConsumerConfig{Durable: "d2", AckPolicy: server.AckExplicit, DeliverSubject: "p.d"})
+	o2, err := mset.AddConsumer(&server.ConsumerConfig{
+		Durable: "d2",
+		AckPolicy: server.AckExplicit,
+		DeliverSubject: "p.d",
+	})
 	if err != nil {
 		t.Fatalf("push consumer create failed: %v", err)
 	}
@@ -646,6 +665,8 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	}
 	defer nc.Close()
 
+	// DirectOnly will return an implementation of the JetStream context
+	// that avoids using the JetStream API.
 	js, err := nc.JetStream(nats.DirectOnly())
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -665,9 +686,9 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	}
 
 	// Check for correct errors.
-	if _, err := js.SubscribeSync("ORDERS"); err != nats.ErrDirectModeRequired {
-		t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrDirectModeRequired, err)
-	}
+	// if _, err := js.SubscribeSync("ORDERS"); err != nats.ErrDirectModeRequired {
+	// 	t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrDirectModeRequired, err)
+	// }
 
 	var sub nats.Consumer
 
@@ -686,7 +707,15 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	// Do push based direct consumer with delivery subject `p.d'
 	// export: { stream: "p.d" }
 	// import: { stream: { subject: "p.d", account: JS } }
-	sub, err = js.SubscribeSync("", nats.PushDirect("p.d"))
+	// sub, err = js.SubscribeSync("", nats.PushDirect("p.d"))
+	// sub, err = js.SubscribeSync("ORDERS", nats.PushDirect("p.d"))
+
+	// When no API access is required, then can just continue to use subjects
+	// for the push consumer.
+	//
+	// import: { stream: { subject: "p.d", account: JS } }
+	// 
+	sub, err = js.SubscribeSync("p.d")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -697,17 +726,28 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	batch := 10
 
 	// These are the same:
+	// { service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS } }
+	// sub, err = js.SubscribeSync("ORDERS", nats.PullDirect("ORDERS", "d1", batch))
 	// sub, err = js.SubscribeSync("", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
-	sub, err = js.SubscribeSync("", nats.PullDirect("ORDERS", "d1", batch))
 	// sub, err = js.SubscribeSync("", nats.PullDirect("ORDERS", "d1", batch))
+	// sub, err = js.SubscribeSync("anything", nats.Attach("ORDERS", "d1"), nats.Pull(batch))
+
+	// The Worst
+	// sub, err = js.SubscribeSync("d1", nats.StreamName("ORDERS"), nats.Pull(batch))
+
+	// OK
+	// $JS.API.CONSUMER.MSG.NEXT.ORDERS.orders.next
+	// { service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS }, to: "next-order" }
+	sub, err = js.SubscribeSync("next.order", nats.Pull(batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-
 	waitForPending(batch)
+	// waitForPending(1)
 
 	for i := 0; i < toSend; i++ {
 		m, err := sub.NextMsg(100 * time.Millisecond)
+		fmt.Println(m, err)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}

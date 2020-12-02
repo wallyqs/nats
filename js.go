@@ -139,7 +139,7 @@ const (
 
 // JetStream returns a JetStream context for pub/sub interactions.
 func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
-	// TODO: Make Option
+	// Option: nats.MaxWait()
 	const defaultRequestWait = 5 * time.Second
 
 	js := &js{nc: nc, pre: JSDefaultApiPrefix, wait: defaultRequestWait}
@@ -152,7 +152,7 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 
 	// Use the context without API access available.
 	if js.direct {
-		return js, nil
+		return &jsDirectCtx{js}, nil
 	}
 
 	// If direct API access is available, fetch account info.
@@ -175,6 +175,7 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 
 // JetStream client implementation when using direct mode.
 type jsDirectCtx struct {
+	*js
 }
 
 // Instead of PushDirect("p.d")
@@ -183,9 +184,40 @@ type jsDirectCtx struct {
 // 
 // js.SubscribeSync("p.d")
 // 
-func (*jsDirectCtx) SubscribeSync(subj string, opts ...SubOpt) (Consumer, error) {
-	// TODO
-	return nil, nil
+func (js *jsDirectCtx) SubscribeSync(subj string, opts ...SubOpt) (Consumer, error) {
+	// Apply the options before passing one time.
+	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
+	o := subOpts{cfg: &cfg}
+	if len(opts) > 0 {
+		for _, f := range opts {
+			if err := f(&o); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Check if trying to create a pull consumer,
+	// if so the subject becomes the delivery subject.
+	isPushConsumer := o.pull == 0
+	if isPushConsumer {
+		// The subject is the delivery subject.
+		fn := func(opts *subOpts) error {
+			opts.cfg.DeliverSubject = subj
+			return nil
+		}
+		opts = append(opts, fn)
+	} else {
+		// o.stream != ""
+		// The subject is the durable name from the consumer.
+		fn := func(opts *subOpts) error {
+			opts.consumer = subj
+			return nil
+		}
+		opts = append(opts, fn)
+	}
+
+	mch := make(chan *Msg, js.nc.Opts.SubChanLen)
+	return js.subscribe(subj, _EMPTY_, nil, mch, opts)
 }
 
 // JSOpt configures options for the jetstream context.
@@ -489,7 +521,6 @@ type JSApiStreamNamesResponse struct {
 }
 
 func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*jsSub, error) {
-	// TODO: a
 	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
 	o := subOpts{cfg: &cfg}
 	if len(opts) > 0 {
@@ -511,15 +542,18 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 
 	// If we are attaching to an existing consumer.
 	shouldAttach := o.stream != _EMPTY_ && o.consumer != _EMPTY_ || o.cfg.DeliverSubject != _EMPTY_
+	fmt.Printf("==================== %+v\n", o)
+	fmt.Printf("==================== %+v || %v\n", o.cfg, shouldAttach)
+	
 	shouldCreate := !shouldAttach
-	noApiAccess := js.direct
+	hasApiAccess := !js.direct
 
 	// Cannot create consumer unless there is direct API access.
-	if noApiAccess && shouldCreate {
-		return nil, ErrDirectModeRequired
-	}
+	// if noApiAccess && shouldCreate {
+	// 	return nil, ErrDirectModeRequired
+	// }
 
-	if noApiAccess {
+	if !hasApiAccess {
 		// If there is no api access, then can use the PushDirect option
 		// to set one, otherwise an inbox will be created on the fly.
 		if o.cfg.DeliverSubject != _EMPTY_ {
@@ -581,7 +615,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	sub.jsi = &jsSub{js: js}
 
 	// If we are creating or updating let's process that request.
-	if shouldCreate {
+	if hasApiAccess && shouldCreate {
 		// If not set default to ack explicit.
 		if cfg.AckPolicy == ackPolicyNotSet {
 			cfg.AckPolicy = AckExplicit
@@ -638,7 +672,8 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	} else {
 		sub.jsi.stream = o.stream
 		sub.jsi.consumer = o.consumer
-		if js.direct {
+		fmt.Printf("|||||||| %+v |||||| %+v\n", sub.jsi, o.cfg.DeliverSubject)
+		if !hasApiAccess {
 			sub.jsi.deliver = o.cfg.DeliverSubject
 		} else {
 			sub.jsi.deliver = ccfg.DeliverSubject
@@ -648,6 +683,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// If we are pull based go ahead and fire off the first request to populate.
 	jsub := &jsSub{Subscription:sub}
 	if isPullMode {
+		jsub.deliver = subj
 		sub.jsi.pull = o.pull
 		jsub.Poll()
 	}
@@ -688,6 +724,14 @@ type subOpts struct {
 	mack bool
 	// For creating or updating.
 	cfg *ConsumerConfig
+}
+
+// StreamName, move to other package to have Stream() option to set name.
+func StreamName(name string) SubOpt {
+	return func(opts *subOpts) error {
+		opts.stream = name
+		return nil
+	}
 }
 
 func Durable(name string) SubOpt {
@@ -784,7 +828,7 @@ func (sub *jsSub) ConsumerInfo() (*ConsumerInfo, error) {
 	return js.getConsumerInfo(stream, consumer)
 }
 
-// Poll make a fetch request
+// Poll makes a fetch request.
 func (sub *jsSub) Poll() error {
 	sub.mu.Lock()
 	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull == 0 {
@@ -795,10 +839,17 @@ func (sub *jsSub) Poll() error {
 	nc, reply := sub.conn, sub.Subject
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	js := sub.jsi.js
+	hasApiAccess := !js.direct
 	sub.mu.Unlock()
 
 	req, _ := json.Marshal(&NextRequest{Batch: batch})
-	reqNext := js.apiSubj(fmt.Sprintf(JSApiRequestNextT, stream, consumer))
+
+	var reqNext string
+	if stream != _EMPTY_ && consumer != _EMPTY_ {
+		reqNext = js.apiSubj(fmt.Sprintf(JSApiRequestNextT, stream, consumer))
+	} else if !hasApiAccess {
+		reqNext = sub.deliver
+	}
 
 	// Request:
 	// 
@@ -864,19 +915,29 @@ func (m *Msg) ackReply(ackType []byte, sync bool) error {
 	if err != nil {
 		return err
 	}
+
+	// If there was no delivery subject when the consumer was configured,
+	// then we are in pull mode and expect pull option to be more than 1.
 	if isPullMode {
+		// fmt.Println("ACKING with:", string(ackType), string(AckAck), m.Reply, m.Sub.Subject, string(AckNext))
+		// Pull next message into the delivery subject.
 		if bytes.Equal(ackType, AckAck) {
 			err = js.nc.PublishRequest(m.Reply, m.Sub.Subject, AckNext)
 		} else if bytes.Equal(ackType, AckNak) || bytes.Equal(ackType, AckTerm) {
 			err = js.nc.PublishRequest(m.Reply, m.Sub.Subject, []byte("+NXT {\"batch\":1}"))
 		}
 		if sync && err == nil {
+			// Ack and wait until server has processed the ack.
 			_, err = js.nc.Request(m.Reply, nil, js.wait)
 		}
 	} else if sync {
+		// Wait for the server to process our ack response.
 		_, err = js.nc.Request(m.Reply, ackType, js.wait)
 	} else {
+		// Ack to the server that the message has been processed,
+		// do not need to wait for a response.
 		err = js.nc.Publish(m.Reply, ackType)
+		// err = js.nc.Flush()
 	}
 	return err
 }
