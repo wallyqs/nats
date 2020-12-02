@@ -198,17 +198,31 @@ func (js *jsDirectCtx) SubscribeSync(subj string, opts ...SubOpt) (Consumer, err
 
 	// Check if trying to create a pull consumer,
 	// if so the subject becomes the delivery subject.
+	fmt.Println("?>>> ", o.consumer)
 	isPushConsumer := o.pull == 0
+
 	if isPushConsumer {
 		// The subject is the delivery subject.
+		//
+		// 
+		// import: { stream: { subject: "p.d", account: JS } }
+		//
+		// usage:  js.SubscribeSync("p.d")
+		// 
 		fn := func(opts *subOpts) error {
 			opts.cfg.DeliverSubject = subj
 			return nil
 		}
 		opts = append(opts, fn)
-	} else {
-		// o.stream != ""
-		// The subject is the durable name from the consumer.
+	} else if o.consumer == _EMPTY_ {
+		// This means that attach was not used. When using direct mode (no API access),
+		// now we could do the following with an import like:
+		// 
+		// import: { service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS }, to: "next.order" }
+		//
+		//
+		// usage: js.SubscribeSync("next.order", nats.Pull(batch))
+		// 
 		fn := func(opts *subOpts) error {
 			opts.consumer = subj
 			return nil
@@ -216,6 +230,7 @@ func (js *jsDirectCtx) SubscribeSync(subj string, opts ...SubOpt) (Consumer, err
 		opts = append(opts, fn)
 	}
 
+	// TODO: particular SubOpt?
 	mch := make(chan *Msg, js.nc.Opts.SubChanLen)
 	return js.subscribe(subj, _EMPTY_, nil, mch, opts)
 }
@@ -542,8 +557,8 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 
 	// If we are attaching to an existing consumer.
 	shouldAttach := o.stream != _EMPTY_ && o.consumer != _EMPTY_ || o.cfg.DeliverSubject != _EMPTY_
-	fmt.Printf("==================== %+v\n", o)
-	fmt.Printf("==================== %+v || %v\n", o.cfg, shouldAttach)
+	// fmt.Printf("==================== %+v\n", o)
+	// fmt.Printf("==================== %+v || %v\n", o.cfg, shouldAttach)
 	
 	shouldCreate := !shouldAttach
 	hasApiAccess := !js.direct
@@ -672,7 +687,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	} else {
 		sub.jsi.stream = o.stream
 		sub.jsi.consumer = o.consumer
-		fmt.Printf("|||||||| %+v |||||| %+v\n", sub.jsi, o.cfg.DeliverSubject)
+		// fmt.Printf("|||||||| %+v |||||| %+v\n", sub.jsi, o.cfg.DeliverSubject)
 		if !hasApiAccess {
 			sub.jsi.deliver = o.cfg.DeliverSubject
 		} else {
@@ -910,7 +925,7 @@ func (m *Msg) ackReply(ackType []byte, sync bool) error {
 	if m == nil {
 		return ErrInvalidMsg
 	}
-	fmt.Printf("....................................%+v\n", m)
+	// fmt.Printf("....................................%+v\n", m)
 	js, isPullMode, err := m.checkReply()
 	if err != nil {
 		return err
@@ -979,7 +994,7 @@ type MsgMetaData struct {
 }
 
 func (m *Msg) MetaData() (*MsgMetaData, error) {
-	fmt.Println("MSG: >>>>>>>>>>>", m)
+	// fmt.Println("MSG: >>>>>>>>>>>", m)
 	if _, _, err := m.checkReply(); err != nil {
 		return nil, err
 	}
@@ -1025,8 +1040,8 @@ func (m *Msg) MetaData() (*MsgMetaData, error) {
 		Timestamp: time.Unix(0, parseNum(tokens[7])),
 		Pending:   uint64(parseNum(tokens[8])),
 	}
-	fmt.Printf("??????????? tokens: %+v\n", tokens)
-	fmt.Printf("??????????? %+v\n", meta)
+	// fmt.Printf("??????????? tokens: %+v\n", tokens)
+	// fmt.Printf("??????????? %+v\n", meta)
 
 	return meta, nil
 }
