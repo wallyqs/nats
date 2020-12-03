@@ -1004,9 +1004,6 @@ func TestJetStreamImportDirectOnlyNonSync(t *testing.T) {
 				imports [
 					{ service: { subject: "ORDERS", account: JS } , to: "orders" }
 
-					# For the acks. Service in case we want an ack to our ack.
-					{ service: { subject: "$JS.ACK.ORDERS.*.>", account: JS } }
-
 					# Pull based consumer to simple subject (SubscribeSync(''))
 					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS } }
 
@@ -1018,6 +1015,10 @@ func TestJetStreamImportDirectOnlyNonSync(t *testing.T) {
 
 					# Push based consumer with manual acks
 					{ stream: { subject: "p.d4", account: JS } }
+
+					# For the acks. Service in case we want an ack to our ack.
+					# { service: { subject: "$JS.ACK.ORDERS.*.>", account: JS } }
+                                        { service: { subject: "$JS.ACK.ORDERS.*.>", account: JS }, to: "orders.acks.*.>" }
 				]
 			},
 		}
@@ -1142,9 +1143,20 @@ func TestJetStreamImportDirectOnlyNonSync(t *testing.T) {
 	seen = 0
 	sub, err = js.Subscribe("p.d4", func(m *nats.Msg){
 		seen++
+
+		// This is wrong in case the subject has been prefixed.
 		m.MetaData()
-		err := m.AckSync()
-		fmt.Println(err)
+
+		// err := m.AckSync()
+		// fmt.Println(err)
+		// $JS.ACK.ORDERS
+		//
+
+		// We need to keep info on the Msg about the ack response,
+		// option to be able to respond to acks.
+		subj := strings.Replace(m.Reply, "$JS.ACK.ORDERS", "orders.acks", 1)
+		resp, err := nc.Request(subj, nil, 1*time.Second)
+		fmt.Printf("AckSync Response: %+v || %+v || %+v\n", resp, subj, err)
 	}, nats.ManualAck())
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
