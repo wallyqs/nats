@@ -969,3 +969,191 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 		}
 	}
 }
+
+
+func TestJetStreamImportDirectOnlyNonSync(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		listen: 127.0.0.1:-1
+		no_auth_user: rip
+		jetstream: {max_mem_store: 64GB, max_file_store: 10TB}
+                debug: true
+                trace: true
+		accounts: {
+			JS: {
+				jetstream: enabled
+				users: [ {user: dlc, password: foo} ]
+				exports [
+					# For the stream publish.
+					{ service: "ORDERS" }
+
+					# For the pull based consumers. Response type needed for batchsize > 1
+					{ service: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", response: stream }
+					{ service: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d3", response: stream }
+
+					# For the push based consumer delivery and ack.
+					{ stream: "p.d" }, { stream: "p.d4" }
+
+					# For the acks. Service in case we want an ack to our ack.
+					{ service: "$JS.ACK.ORDERS.*.>" }
+				]
+			}
+
+			# Account U imports the streams and consumers created in the JS account.
+			U: {
+				users: [ {user: rip, password: bar} ]
+				imports [
+					{ service: { subject: "ORDERS", account: JS } , to: "orders" }
+
+					# For the acks. Service in case we want an ack to our ack.
+					{ service: { subject: "$JS.ACK.ORDERS.*.>", account: JS } }
+
+					# Pull based consumer to simple subject (SubscribeSync(''))
+					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS } }
+
+					# Pull based consumer to simple subject (SubscribeSync('next.order'))
+					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d3", account: JS }, to: "next.order" }
+
+					# Push based consumer with auto acks
+					{ stream: { subject: "p.d", account: JS } }
+
+					# Push based consumer with manual acks
+					{ stream: { subject: "p.d4", account: JS } }
+				]
+			},
+		}
+	`))
+	defer os.Remove(conf)
+
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	if config := s.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
+	// Create a stream using the server directly.
+	acc, _ := s.LookupAccount("JS")
+	mset, err := acc.AddStream(&server.StreamConfig{Name: "ORDERS"})
+	if err != nil {
+		t.Fatalf("stream create failed: %v", err)
+	}
+	defer mset.Delete()
+
+	// Create a pull based consumer.
+	o1, err := mset.AddConsumer(&server.ConsumerConfig{
+		Durable: "d1",
+		AckPolicy: server.AckExplicit,
+	})
+	if err != nil {
+		t.Fatalf("pull consumer create failed: %v", err)
+	}
+	defer o1.Delete()
+
+	// Create a push based consumer.
+	o2, err := mset.AddConsumer(&server.ConsumerConfig{
+		Durable: "d2",
+		AckPolicy: server.AckExplicit,
+		DeliverSubject: "p.d",
+	})
+	if err != nil {
+		t.Fatalf("push consumer create failed: %v", err)
+	}
+	defer o2.Delete()
+
+	// Another pull based consumer
+	o3, err := mset.AddConsumer(&server.ConsumerConfig{
+		Durable: "d3",
+		AckPolicy: server.AckExplicit,
+	})
+	if err != nil {
+		t.Fatalf("push consumer create failed: %v", err)
+	}
+	defer o3.Delete()
+
+	o4, err := mset.AddConsumer(&server.ConsumerConfig{
+		Durable: "d4",
+		AckPolicy: server.AckExplicit,
+		DeliverSubject: "p.d4",
+	})
+	if err != nil {
+		t.Fatalf("push consumer create failed: %v", err)
+	}
+	defer o4.Delete()
+
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	// DirectOnly will return an implementation of the JetStream context
+	// that avoids using the JetStream API.
+	js, err := nc.JetStream(nats.DirectOnly())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// Now make sure we can send to the stream.
+	toSend := 100
+	for i := 0; i < toSend; i++ {
+		if _, err := js.Publish("orders", []byte(fmt.Sprintf("ORDER-%d", i+1))); err != nil {
+			t.Fatalf("Unexpected error publishing message %d: %v", i+1, err)
+		}
+	}
+	if state := mset.State(); state.Msgs != uint64(toSend) {
+		t.Fatalf("Expected %d messages, got %d", toSend, state.Msgs)
+	}
+
+	// When no API access is required, then can just continue
+	// to use subjects for the push consumer.
+	//
+	// export: { stream: "p.d" }
+	// import: { stream: { subject: "p.d", account: JS } }
+	//
+	var sub nats.Consumer
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	seen := 0
+	expected := 100
+	sub, err = js.Subscribe("p.d", func(m *nats.Msg){
+		seen++
+		if seen == expected {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	<-ctx.Done()
+
+	got := seen
+	if got != expected {
+		t.Errorf("Expected %d, got %d", expected, got)
+	}
+	fmt.Println("js_test.go :: ", sub)
+	sub.Unsubscribe()
+
+	// Now the same push consumer with manual acks.
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Can only do one of these per... what?
+	seen = 0
+	sub, err = js.Subscribe("p.d4", func(m *nats.Msg){
+		seen++
+		m.MetaData()
+		err := m.AckSync()
+		fmt.Println(err)
+	}, nats.ManualAck())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	<-ctx.Done()
+
+	got = seen
+	expected = 100
+	if got != expected {
+		t.Errorf("Expected %d, got %d", expected, got)
+	}	
+}

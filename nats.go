@@ -3869,7 +3869,8 @@ func (s *Subscription) Dropped() (int, error) {
 	return s.dropped, nil
 }
 
-// Respond allows a convenient way to respond to requests in service based subscriptions.
+// Respond allows a convenient way to respond to requests in service
+// based subscriptions.
 func (m *Msg) Respond(data []byte) error {
 	if m == nil || m.Sub == nil {
 		return ErrMsgNotBound
@@ -3880,11 +3881,14 @@ func (m *Msg) Respond(data []byte) error {
 	m.Sub.mu.Lock()
 	nc := m.Sub.conn
 	m.Sub.mu.Unlock()
-	// No need to check the connection here since the call to publish will do all the checking.
+
+	// No need to check the connection here since the call to
+	// publish will do all the checking.
 	return nc.Publish(m.Reply, data)
 }
 
-// RespondMsg allows a convenient way to respond to requests in service based subscriptions that might include headers
+// RespondMsg allows a convenient way to respond to requests in
+// service based subscriptions that might include headers.
 func (m *Msg) RespondMsg(msg *Msg) error {
 	if m == nil || m.Sub == nil {
 		return ErrMsgNotBound
@@ -3896,7 +3900,9 @@ func (m *Msg) RespondMsg(msg *Msg) error {
 	m.Sub.mu.Lock()
 	nc := m.Sub.conn
 	m.Sub.mu.Unlock()
-	// No need to check the connection here since the call to publish will do all the checking.
+
+	// No need to check the connection here since the call to
+	// publish will do all the checking.
 	return nc.PublishMsg(msg)
 }
 

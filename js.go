@@ -178,6 +178,56 @@ type jsDirectCtx struct {
 	*js
 }
 
+// Subscribe with direct access can just use the plain subjects
+// that have been set from on an import.
+func (js *jsDirectCtx) Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (Consumer, error) {
+	// Apply the options before passing one time.
+	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
+	o := subOpts{cfg: &cfg}
+	if len(opts) > 0 {
+		for _, f := range opts {
+			if err := f(&o); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Check if trying to create a pull consumer,
+	// if so the subject becomes the delivery subject.
+	// fmt.Println("?>>> ", o.consumer)
+	isPushConsumer := o.pull == 0
+
+	if isPushConsumer {
+		// The subject is the delivery subject.
+		//
+		// 
+		// import: { stream: { subject: "p.d", account: JS } }
+		//
+		// usage:  js.SubscribeSync("p.d")
+		// 
+		fn := func(opts *subOpts) error {
+			opts.cfg.DeliverSubject = subj
+			return nil
+		}
+		opts = append(opts, fn)
+	} else if o.consumer == _EMPTY_ {
+		// This means that attach was not used. When using direct mode (no API access),
+		// now we could do the following with an import like:
+		// 
+		// import: { service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS }, to: "next.order" }
+		//
+		//
+		// usage: js.SubscribeSync("next.order", nats.Pull(batch))
+		// 
+		fn := func(opts *subOpts) error {
+			opts.consumer = subj
+			return nil
+		}
+		opts = append(opts, fn)
+	}
+	return js.subscribe(subj, _EMPTY_, cb, nil, opts)
+}
+
 // Instead of PushDirect("p.d")
 // 
 // sub, err = js.SubscribeSync("", nats.PushDirect("p.d"))
@@ -198,7 +248,7 @@ func (js *jsDirectCtx) SubscribeSync(subj string, opts ...SubOpt) (Consumer, err
 
 	// Check if trying to create a pull consumer,
 	// if so the subject becomes the delivery subject.
-	fmt.Println("?>>> ", o.consumer)
+	// fmt.Println("?>>> ", o.consumer)
 	isPushConsumer := o.pull == 0
 
 	if isPushConsumer {
@@ -585,9 +635,9 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		ccfg = &info.Config
 
 		// Make sure this new subject matches or is a subset.
-		// if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
-		// 	return nil, ErrSubjectMismatch
-		// }
+		if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
+			return nil, ErrSubjectMismatch
+		}
 		if ccfg.DeliverSubject != _EMPTY_ {
 			deliver = ccfg.DeliverSubject
 		} else {
@@ -994,7 +1044,7 @@ type MsgMetaData struct {
 }
 
 func (m *Msg) MetaData() (*MsgMetaData, error) {
-	// fmt.Println("MSG: >>>>>>>>>>>", m)
+	fmt.Println("MSG: >>>>>>>>>>>", m.Subject, m.Reply)
 	if _, _, err := m.checkReply(); err != nil {
 		return nil, err
 	}
