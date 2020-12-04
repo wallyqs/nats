@@ -584,12 +584,17 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 				exports [
 					# For the stream publish.
 					{ service: "ORDERS" }
+					{ service: "ORDERS.A" }
+					{ service: "ORDERS.B" }
+
 					# For the pull based consumer. Response type needed for batchsize > 1
 					{ service: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", response: stream }
 					{ service: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.dA1", response: stream }
+
 					# For the push based consumer delivery and ack.
 					{ stream: "p.d" }
 					{ stream: "p.da2" }
+
 					# For the acks. Service in case we want an ack to our ack.
 					{ service: "$JS.ACK.ORDERS.*.>" }
 				]
@@ -598,6 +603,8 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 				users: [ {user: rip, password: bar} ]
 				imports [
 					{ service: { subject: "ORDERS", account: JS } , to: "orders" }
+					{ service: { subject: "ORDERS.A", account: JS } , to: "a.orders" }
+					{ service: { subject: "ORDERS.B", account: JS } , to: "b.orders" }
 					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.d1", account: JS } }
 					{ service: { subject: "$JS.API.CONSUMER.MSG.NEXT.ORDERS.dA1", account: JS }, to: "next.order" }
 					{ stream:  { subject: "p.d", account: JS } }
@@ -618,7 +625,10 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 
 	// Create a stream using the server directly.
 	acc, _ := s.LookupAccount("JS")
-	mset, err := acc.AddStream(&server.StreamConfig{Name: "ORDERS"})
+	mset, err := acc.AddStream(&server.StreamConfig{
+		Name: "ORDERS",
+		Subjects: []string{"ORDERS", "ORDERS.A", "ORDERS.B"},
+	})
 	if err != nil {
 		t.Fatalf("stream create failed: %v", err)
 	}
@@ -660,14 +670,20 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	// Now make sure we can send to the stream.
+	// Now make sure we can send to the subjects from the stream.
 	toSend := 100
 	for i := 0; i < toSend; i++ {
 		if _, err := js.Publish("orders", []byte(fmt.Sprintf("ORDER-%d", i+1))); err != nil {
 			t.Fatalf("Unexpected error publishing message %d: %v", i+1, err)
 		}
+		if _, err := js.Publish("a.orders", []byte(fmt.Sprintf("ORDER-A-%d", i+1))); err != nil {
+			t.Fatalf("Unexpected error publishing message %d: %v", i+1, err)
+		}
+		if _, err := js.Publish("b.orders", []byte(fmt.Sprintf("ORDER-B-%d", i+1))); err != nil {
+			t.Fatalf("Unexpected error publishing message %d: %v", i+1, err)
+		}
 	}
-	if state := mset.State(); state.Msgs != uint64(toSend) {
+	if state := mset.State(); state.Msgs != uint64(toSend*3) {
 		t.Fatalf("Expected %d messages, got %d", toSend, state.Msgs)
 	}
 
@@ -730,6 +746,8 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	}
 
 	// Push directly to imported subject 'p.d'.
+	// sub, err = js.SubscribeSync("p.d")
+	// In case of 
 	sub, err = js.SubscribeSync("p.d")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)

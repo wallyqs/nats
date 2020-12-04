@@ -642,6 +642,25 @@ func Pull(batchSize int) SubOpt {
 	}
 }
 
+func PullDirect(stream, consumer string, batchSize int) SubOpt {
+	return func(opts *subOpts) error {
+		if batchSize == 0 {
+			return errors.New("nats: batch size of 0 not valid")
+		}
+		opts.stream = stream
+		opts.consumer = consumer
+		opts.pull = batchSize
+		return nil
+	}
+}
+
+func PushDirect(deliverSubject string) SubOpt {
+	return func(opts *subOpts) error {
+		opts.cfg.DeliverSubject = deliverSubject
+		return nil
+	}
+}
+
 func ManualAck() SubOpt {
 	return func(opts *subOpts) error {
 		opts.mack = true
