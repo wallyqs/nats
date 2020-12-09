@@ -97,7 +97,7 @@ func TestJetStreamPublish(t *testing.T) {
 	}
 
 	// Create the stream using our client API.
-	_, err = js.AddStream(&nats.StreamConfig{
+	_, err = js.Manager().AddStream(&nats.StreamConfig{
 		Name:     "TEST",
 		Subjects: []string{"test", "foo", "bar"},
 	})
@@ -236,7 +236,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 
 	// Create the stream using our client API.
-	_, err = js.AddStream(&nats.StreamConfig{
+	_, err = js.Manager().AddStream(&nats.StreamConfig{
 		Name:     "TEST",
 		Subjects: []string{"foo", "bar", "baz", "foo.*"},
 	})
@@ -493,7 +493,6 @@ func TestAckForNonJetStream(t *testing.T) {
 	}
 }
 
-// TODO(dlc) - fill out with more stuff.
 func TestJetStreamManagement(t *testing.T) {
 	s := RunBasicJetStreamServer()
 	defer s.Shutdown()
@@ -514,7 +513,7 @@ func TestJetStreamManagement(t *testing.T) {
 	}
 
 	// Create the stream using our client API.
-	si, err := js.AddStream(&nats.StreamConfig{Name: "foo"})
+	si, err := js.Manager().AddStream(&nats.StreamConfig{Name: "foo"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -523,7 +522,7 @@ func TestJetStreamManagement(t *testing.T) {
 	}
 
 	// Check info calls.
-	si, err = js.StreamInfo("foo")
+	si, err = js.Manager().StreamInfo("foo")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -532,7 +531,7 @@ func TestJetStreamManagement(t *testing.T) {
 	}
 
 	// Create a consumer using our client API.
-	ci, err := js.AddConsumer("foo", &nats.ConsumerConfig{Durable: "dlc", AckPolicy: nats.AckExplicit})
+	ci, err := js.Manager().AddConsumer("foo", &nats.ConsumerConfig{Durable: "dlc", AckPolicy: nats.AckExplicit})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -572,7 +571,7 @@ func TestJetStreamImport(t *testing.T) {
 
 	// Create a stream using the server directly.
 	acc, _ := s.LookupAccount("JS")
-	mset, err := acc.AddStream(&server.StreamConfig{
+	mset, err := acc.Manager().AddStream(&server.StreamConfig{
 		Name:     "TEST",
 		Subjects: []string{"foo", "bar"},
 	})
@@ -645,21 +644,21 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 
 	// Create a stream using the server directly.
 	acc, _ := s.LookupAccount("JS")
-	mset, err := acc.AddStream(&server.StreamConfig{Name: "ORDERS"})
+	mset, err := acc.Manager().AddStream(&server.StreamConfig{Name: "ORDERS"})
 	if err != nil {
 		t.Fatalf("stream create failed: %v", err)
 	}
 	defer mset.Delete()
 
 	// Create a pull based consumer.
-	o1, err := mset.AddConsumer(&server.ConsumerConfig{Durable: "d1", AckPolicy: server.AckExplicit})
+	o1, err := mset.Manager().AddConsumer(&server.ConsumerConfig{Durable: "d1", AckPolicy: server.AckExplicit})
 	if err != nil {
 		t.Fatalf("pull consumer create failed: %v", err)
 	}
 	defer o1.Delete()
 
 	// Create a push based consumer.
-	o2, err := mset.AddConsumer(&server.ConsumerConfig{Durable: "d2", AckPolicy: server.AckExplicit, DeliverSubject: "p.d"})
+	o2, err := mset.Manager().AddConsumer(&server.ConsumerConfig{Durable: "d2", AckPolicy: server.AckExplicit, DeliverSubject: "p.d"})
 	if err != nil {
 		t.Fatalf("push consumer create failed: %v", err)
 	}
@@ -865,7 +864,7 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 	}
 
 	// Create a stream.
-	if _, err = js.AddStream(&nats.StreamConfig{Name: "STALL"}); err != nil {
+	if _, err = js.Manager().AddStream(&nats.StreamConfig{Name: "STALL"}); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	acc, _ := s.LookupAccount("JS")

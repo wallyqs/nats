@@ -25,6 +25,10 @@ import (
 	"time"
 )
 
+// js implements the JetStream and JetStreamManager interface.
+var _ JetStream = &js{}
+var _ JetStreamManager = &jsm{}
+
 // JetStream is the public interface for the JetStream context.
 type JetStream interface {
 	// Publishing messages to JetStream.
@@ -38,16 +42,16 @@ type JetStream interface {
 	ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (*Subscription, error)
 	// QueueSubscribe.
 	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (*Subscription, error)
+}
 
-	// Management
+// JetStreamManager
+type JetStreamManager interface {
 	// Create a stream.
 	AddStream(cfg *StreamConfig) (*StreamInfo, error)
 	// Create a consumer.
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
 	// Stream information.
 	StreamInfo(stream string) (*StreamInfo, error)
-
-	// TODO(dlc) - add more
 }
 
 // ApiError is included in all API responses if there was an error.
@@ -116,7 +120,7 @@ const (
 )
 
 // JetStream returns a JetStream context for pub/sub interactions.
-func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
+func (nc *Conn) JetStream(opts ...JSOpt) (*js, error) {
 	const defaultRequestWait = 5 * time.Second
 
 	js := &js{nc: nc, pre: JSDefaultApiPrefix, wait: defaultRequestWait}
@@ -993,10 +997,10 @@ func (p DeliverPolicy) MarshalJSON() ([]byte, error) {
 }
 
 // Management for JetStream
-// TODO(dlc) - Fill this out.
 
 // AddConsumer will add a JetStream consumer.
-func (js *js) AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error) {
+func (jsm *jsm) AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error) {
+	js := jsm.js
 	if stream == _EMPTY_ {
 		return nil, ErrStreamNameRequired
 	}
@@ -1056,7 +1060,17 @@ type JSApiStreamCreateResponse struct {
 	*StreamInfo
 }
 
-func (js *js) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
+// Manager returns a JetStreamManager to interact with the JetStream API.
+func (js *js) Manager() JetStreamManager {
+	return &jsm{js}
+}
+
+type jsm struct {
+	js *js
+}
+
+func (jsm *jsm) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
+	js := jsm.js
 	if cfg == nil || cfg.Name == _EMPTY_ {
 		return nil, ErrStreamNameRequired
 	}
@@ -1083,7 +1097,8 @@ func (js *js) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
 
 type JSApiStreamInfoResponse = JSApiStreamCreateResponse
 
-func (js *js) StreamInfo(stream string) (*StreamInfo, error) {
+func (jsm *jsm) StreamInfo(stream string) (*StreamInfo, error) {
+	js := jsm.js
 	csSubj := js.apiSubj(fmt.Sprintf(JSApiStreamInfoT, stream))
 	r, err := js.nc.Request(csSubj, nil, js.wait)
 	if err != nil {
