@@ -30,22 +30,55 @@ import (
 type JetStream interface {
 	// Publishing messages to JetStream.
 	Publish(subj string, data []byte, opts ...jetstream.PubOpt) (*PubAck, error)
-	PublishMsg(m *Msg, opts ...jetstream.PubOpt) (*PubAck, error)
+	PublishMsg(m Message, opts ...jetstream.PubOpt) (*PubAck, error)
 
 	// Subscribing to messages in JetStream.
-	Subscribe(subj string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error)
+	Subscribe(subj string, cb func(Message), opts ...jetstream.SubOpt) (*Subscription, error)
 	SubscribeSync(subj string, opts ...jetstream.SubOpt) (*Subscription, error)
 
 	// Channel versions.
-	ChanSubscribe(subj string, ch chan *Msg, opts ...jetstream.SubOpt) (*Subscription, error)
+	ChanSubscribe(subj string, ch chan Message, opts ...jetstream.SubOpt) (*Subscription, error)
 	// QueueSubscribe.
-	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error)
+	QueueSubscribe(subj, queue string, cb func(Message), opts ...jetstream.SubOpt) (*Subscription, error)
+
+	Manager() JetStreamManager
 }
 
 // JetStreamManager reprensts the behaviors for managing streams and consumers.
 type JetStreamManager interface {
 	AddStream(cfg *StreamConfig) (*StreamInfo, error)
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
+}
+
+// Message is the interface of a NATS message.
+type Message interface {
+	Respond(data []byte) error
+	RespondMsg(Message) error
+	Subject() string
+	Reply() string
+	Header() http.Header
+	Data() []byte
+
+	// Subscription has to be accessible for a Message.
+	Subscription() *Subscription
+	
+	MetaData() (MetaData, error)
+
+	// Ack related
+	Ack() error
+	AckSync() error
+	InProgress() error
+	Nak() error
+	Term() error
+}
+
+// Message Metadata
+type MetaData interface {
+	Consumer()  uint64
+	Stream()    uint64
+	Delivered() uint64
+	Pending()   uint64
+	Timestamp() time.Time
 }
 
 // Internal struct for jetstream
@@ -83,7 +116,7 @@ const (
 
 // JetStream returns a JetStream context for pub/sub interactions.
 // func (nc *Conn) JetStream(opts ...JSOpt) (*js, error) {
-func (nc *Conn) JetStream(opts ...jetstream.Option) (*js, error) {
+func (nc *Conn) JetStream(opts ...jetstream.Option) (JetStream, error) {
 	const defaultRequestWait = 5 * time.Second
 
 	js := &js{nc: nc}
@@ -119,7 +152,7 @@ func (nc *Conn) JetStream(opts ...jetstream.Option) (*js, error) {
 	return js, nil
 }
 
-func (js *js) Manager() (JetStreamManager) {
+func (js *js) Manager() JetStreamManager {
 	return &jsm{js}
 }
 
@@ -152,12 +185,9 @@ const (
 	ExpectedLastMsgIdHdr = "Nats-Expected-Last-Msg-Id"
 )
 
-func (js *js) PublishMsg(m *Msg, opts ...jetstream.PubOpt) (*PubAck, error) {
+func (js *js) PublishMsg(m Message, opts ...jetstream.PubOpt) (*PubAck, error) {
 	var o jetstream.PubOpts
 	if len(opts) > 0 {
-		if m.Header == nil {
-			m.Header = http.Header{}
-		}
 		for _, f := range opts {
 			if err := f(&o); err != nil {
 				return nil, err
@@ -174,25 +204,30 @@ func (js *js) PublishMsg(m *Msg, opts ...jetstream.PubOpt) (*PubAck, error) {
 	}
 
 	if o.MsgId != _EMPTY_ {
-		m.Header.Set(MsgIdHdr, o.MsgId)
+		m.Header().Set(MsgIdHdr, o.MsgId)
 	}
 	if o.LastMsgId != _EMPTY_ {
-		m.Header.Set(ExpectedLastMsgIdHdr, o.LastMsgId)
+		m.Header().Set(ExpectedLastMsgIdHdr, o.LastMsgId)
 	}
 	if o.Stream != _EMPTY_ {
-		m.Header.Set(ExpectedStreamHdr, o.Stream)
+		m.Header().Set(ExpectedStreamHdr, o.Stream)
 	}
 	if o.Seq > 0 {
-		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.Seq, 10))
+		m.Header().Set(ExpectedLastSeqHdr, strconv.FormatUint(o.Seq, 10))
 	}
 
 	var resp *Msg
 	var err error
 
+	// Etc...
+	msg := NewMsg(m.Subject())
+	msg.Header = m.Header()
+	msg.Reply = m.Reply()
+	msg.Data = m.Data()
 	if o.Ttl > 0 {
-		resp, err = js.nc.RequestMsg(m, o.Ttl)
+		resp, err = js.nc.RequestMsg(msg, o.Ttl)
 	} else {
-		resp, err = js.nc.RequestMsgWithContext(o.Context, m)
+		resp, err = js.nc.RequestMsgWithContext(o.Context, msg)
 	}
 
 	if err != nil {
@@ -214,8 +249,12 @@ func (js *js) PublishMsg(m *Msg, opts ...jetstream.PubOpt) (*PubAck, error) {
 	return pa.PubAck, nil
 }
 
+type msg struct {
+}
+
 func (js *js) Publish(subj string, data []byte, opts ...jetstream.PubOpt) (*PubAck, error) {
-	return js.PublishMsg(&Msg{Subject: subj, Data: data}, opts...)
+	// return js.PublishMsg(&Msg{Subject: subj, Data: data}, opts...)
+	return js.PublishMsg(nil)
 }
 
 // We will match subjects to streams and consumers on the user's behalf.
@@ -273,8 +312,9 @@ type NextRequest struct {
 }
 
 // Subscribe will create a subscription to the appropriate stream and consumer.
-func (js *js) Subscribe(subj string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error) {
-	return js.subscribe(subj, _EMPTY_, cb, nil, opts)
+func (js *js) Subscribe(subj string, cb func(Message), opts ...jetstream.SubOpt) (*Subscription, error) {
+	wcb := func(m *Msg){ cb(m) }
+	return js.subscribe(subj, _EMPTY_, wcb, nil, opts)
 }
 
 // SubscribeSync will create a sync subscription to the appropriate stream and consumer.
@@ -284,12 +324,12 @@ func (js *js) SubscribeSync(subj string, opts ...jetstream.SubOpt) (*Subscriptio
 }
 
 // QueueSubscribe will create a subscription to the appropriate stream and consumer with queue semantics.
-func (js *js) QueueSubscribe(subj, queue string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error) {
-	return js.subscribe(subj, queue, cb, nil, opts)
+func (js *js) QueueSubscribe(subj, queue string, cb func(Message), opts ...jetstream.SubOpt) (*Subscription, error) {
+	return js.subscribe(subj, queue, func(m *Msg){ cb(m) }, nil, opts)
 }
 
 // Subscribe will create a subscription to the appropriate stream and consumer.
-func (js *js) ChanSubscribe(subj string, ch chan *Msg, opts ...jetstream.SubOpt) (*Subscription, error) {
+func (js *js) ChanSubscribe(subj string, ch chan Message, opts ...jetstream.SubOpt) (*Subscription, error) {
 	return js.subscribe(subj, _EMPTY_, nil, ch, opts)
 }
 
@@ -310,7 +350,7 @@ type JSApiStreamNamesResponse struct {
 	Streams []string `json:"streams"`
 }
 
-func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []jetstream.SubOpt) (*Subscription, error) {
+func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan Message, opts []jetstream.SubOpt) (*Subscription, error) {
 	o := jetstream.SubOpts{}
 	if len(opts) > 0 {
 		for _, f := range opts {
