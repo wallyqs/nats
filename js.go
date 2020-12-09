@@ -40,9 +40,10 @@ type JetStream interface {
 	ChanSubscribe(subj string, ch chan *Msg, opts ...jetstream.SubOpt) (*Subscription, error)
 	// QueueSubscribe.
 	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error)
+}
 
-	// Management
-	// TODO(dlc) - add more
+// JetStreamManager reprensts the behaviors for managing streams and consumers.
+type JetStreamManager interface {
 	AddStream(cfg *StreamConfig) (*StreamInfo, error)
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
 }
@@ -81,7 +82,8 @@ const (
 )
 
 // JetStream returns a JetStream context for pub/sub interactions.
-func (nc *Conn) JetStream(opts ...jetstream.Option) (JetStream, error) {
+// func (nc *Conn) JetStream(opts ...JSOpt) (*js, error) {
+func (nc *Conn) JetStream(opts ...jetstream.Option) (*js, error) {
 	const defaultRequestWait = 5 * time.Second
 
 	js := &js{nc: nc}
@@ -115,6 +117,10 @@ func (nc *Conn) JetStream(opts ...jetstream.Option) (JetStream, error) {
 		return nil, ErrJetStreamNotEnabled
 	}
 	return js, nil
+}
+
+func (js *js) Manager() (JetStreamManager) {
+	return &jsm{js}
 }
 
 func (js *js) apiSubj(subj string) string {
@@ -844,7 +850,9 @@ func (p DeliverPolicy) MarshalJSON() ([]byte, error) {
 // TODO(dlc) - Fill this out.
 
 // AddConsumer will add a JetStream consumer.
-func (js *js) AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error) {
+func (jsm *jsm) AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error) {
+	js := jsm.js
+
 	if stream == _EMPTY_ {
 		return nil, ErrStreamNameRequired
 	}
@@ -904,7 +912,12 @@ type JSApiStreamCreateResponse struct {
 	*StreamInfo
 }
 
-func (js *js) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
+type jsm struct {
+	js *js
+}
+
+func (jsm *jsm) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
+	js := jsm.js
 	if cfg == nil || cfg.Name == _EMPTY_ {
 		return nil, ErrStreamNameRequired
 	}

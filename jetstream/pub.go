@@ -11,7 +11,7 @@ type PubOpt func(opts *PubOpts) error
 type PubOpts struct {
 	Context   context.Context
 	Ttl       time.Duration
-	MsgId        string
+	MsgId     string
 	LastMsgId string // Expected last msgId
 	Stream    string // Expected stream name
 	Seq       uint64 // Expected last sequence
