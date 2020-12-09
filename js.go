@@ -25,10 +25,6 @@ import (
 	"time"
 )
 
-// js implements the JetStream and JetStreamManager interface.
-var _ JetStream = &js{}
-var _ JetStreamManager = &jsm{}
-
 // JetStream is the public interface for the JetStream context.
 type JetStream interface {
 	// Publishing messages to JetStream.
@@ -44,12 +40,14 @@ type JetStream interface {
 	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (*Subscription, error)
 }
 
-// JetStreamManager
+// JetStreamManager represents the behaviors for managing JetStream.
 type JetStreamManager interface {
 	// Create a stream.
 	AddStream(cfg *StreamConfig) (*StreamInfo, error)
+
 	// Create a consumer.
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
+
 	// Stream information.
 	StreamInfo(stream string) (*StreamInfo, error)
 }
@@ -120,7 +118,7 @@ const (
 )
 
 // JetStream returns a JetStream context for pub/sub interactions.
-func (nc *Conn) JetStream(opts ...JSOpt) (*js, error) {
+func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 	const defaultRequestWait = 5 * time.Second
 
 	js := &js{nc: nc, pre: JSDefaultApiPrefix, wait: defaultRequestWait}
@@ -150,6 +148,16 @@ func (nc *Conn) JetStream(opts ...JSOpt) (*js, error) {
 		return nil, ErrJetStreamNotEnabled
 	}
 	return js, nil
+}
+
+// JetStreamManager returns a manager to create streams and consumers.
+func (nc *Conn) JetStreamManager(opts ...JSOpt) (JetStreamManager, error) {
+	jsi, err := nc.JetStream(opts...)
+	if err != nil {
+		return nil, err
+	}
+	jso := jsi.(*js)
+	return &jsm{jso}, nil
 }
 
 // JSOpt configures options for the jetstream context.
