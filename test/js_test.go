@@ -23,6 +23,7 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestJetStreamNotEnabled(t *testing.T) {
@@ -139,12 +140,12 @@ func TestJetStreamPublish(t *testing.T) {
 	expect(1, 1)
 
 	// Test stream expectation.
-	pa, err = js.Publish("foo", msg, nats.ExpectStream("ORDERS"))
+	pa, err = js.Publish("foo", msg, jetstream.ExpectStream("ORDERS"))
 	if err == nil || !strings.Contains(err.Error(), "stream does not match") {
 		t.Fatalf("Expected an error, got %v", err)
 	}
 	// Test last sequence expectation.
-	pa, err = js.Publish("foo", msg, nats.ExpectLastSequence(10))
+	pa, err = js.Publish("foo", msg, jetstream.ExpectLastSequence(10))
 	if err == nil || !strings.Contains(err.Error(), "wrong last sequence") {
 		t.Fatalf("Expected an error, got %v", err)
 	}
@@ -152,14 +153,14 @@ func TestJetStreamPublish(t *testing.T) {
 	expect(0, 1)
 
 	// Send in a stream with a msgId
-	pa, err = js.Publish("foo", msg, nats.MsgId("ZZZ"))
+	pa, err = js.Publish("foo", msg, jetstream.MsgId("ZZZ"))
 	if err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
 	}
 	expect(2, 2)
 
 	// Send in the same message with same msgId.
-	pa, err = js.Publish("foo", msg, nats.MsgId("ZZZ"))
+	pa, err = js.Publish("foo", msg, jetstream.MsgId("ZZZ"))
 	if err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
 	}
@@ -172,19 +173,19 @@ func TestJetStreamPublish(t *testing.T) {
 	expect(2, 2)
 
 	// Now try to send one in with the wrong last msgId.
-	pa, err = js.Publish("foo", msg, nats.ExpectLastMsgId("AAA"))
+	pa, err = js.Publish("foo", msg, jetstream.ExpectLastMsgId("AAA"))
 	if err == nil || !strings.Contains(err.Error(), "wrong last msg") {
 		t.Fatalf("Expected an error, got %v", err)
 	}
 	// Make sure expected sequence works.
-	pa, err = js.Publish("foo", msg, nats.ExpectLastSequence(22))
+	pa, err = js.Publish("foo", msg, jetstream.ExpectLastSequence(22))
 	if err == nil || !strings.Contains(err.Error(), "wrong last sequence") {
 		t.Fatalf("Expected an error, got %v", err)
 	}
 	expect(0, 2)
 
 	// This should work ok.
-	pa, err = js.Publish("foo", msg, nats.ExpectLastSequence(2))
+	pa, err = js.Publish("foo", msg, jetstream.ExpectLastSequence(2))
 	if err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestJetStreamPublish(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err = js.Publish("foo", msg, nats.MaxWait(time.Second), nats.Context(ctx))
+	_, err = js.Publish("foo", msg, jetstream.MaxWait(time.Second), jetstream.Context(ctx))
 	if err != nats.ErrContextAndTimeout {
 		t.Fatalf("Expected %q, got %q", nats.ErrContextAndTimeout, err)
 	}
@@ -204,13 +205,13 @@ func TestJetStreamPublish(t *testing.T) {
 	sub, _ := nc.SubscribeSync("baz")
 	defer sub.Unsubscribe()
 
-	_, err = js.Publish("baz", msg, nats.MaxWait(time.Nanosecond))
+	_, err = js.Publish("baz", msg, jetstream.MaxWait(time.Nanosecond))
 	if err != nats.ErrTimeout {
 		t.Fatalf("Expected %q, got %q", nats.ErrTimeout, err)
 	}
 
 	go cancel()
-	_, err = js.Publish("baz", msg, nats.Context(ctx))
+	_, err = js.Publish("baz", msg, jetstream.Context(ctx))
 	if err != context.Canceled {
 		t.Fatalf("Expected %q, got %q", context.Canceled, err)
 	}
@@ -341,7 +342,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 
 	// Now create a sync subscriber that is durable.
 	dname := "derek"
-	sub, err = js.SubscribeSync("foo", nats.Durable(dname))
+	sub, err = js.SubscribeSync("foo", jetstream.Durable(dname))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -355,7 +356,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	sub.Unsubscribe()
 
 	// Create again and make sure that works and that we attach to the same durable with different delivery.
-	sub, err = js.SubscribeSync("foo", nats.Durable(dname))
+	sub, err = js.SubscribeSync("foo", jetstream.Durable(dname))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -367,7 +368,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	deliver = sub.Subject
 
 	// Now test that we can attach to an existing durable.
-	sub, err = js.SubscribeSync("foo", nats.Attach(mset.Name(), dname))
+	sub, err = js.SubscribeSync("foo", jetstream.Attach(mset.Name(), dname))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -380,12 +381,12 @@ func TestJetStreamSubscribe(t *testing.T) {
 	// Now try pull based subscribers.
 
 	// Check some error conditions first.
-	if _, err := js.Subscribe("bar", func(m *nats.Msg) {}, nats.Pull(1)); err != nats.ErrPullModeNotAllowed {
+	if _, err := js.Subscribe("bar", func(m *nats.Msg) {}, jetstream.Pull(1)); err != nats.ErrPullModeNotAllowed {
 		t.Fatalf("Expected an error trying to do PullMode on callback based subscriber, got %v", err)
 	}
 
 	batch := 5
-	sub, err = js.SubscribeSync("bar", nats.Durable("rip"), nats.Pull(batch))
+	sub, err = js.SubscribeSync("bar", jetstream.Durable("rip"), jetstream.Pull(batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -420,7 +421,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 
 	// Test that if we are attaching that the subjects will match up. rip from
 	// above was created with a filtered subject of bar, so this should fail.
-	_, err = js.SubscribeSync("baz", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
+	_, err = js.SubscribeSync("baz", jetstream.Attach(mset.Name(), "rip"), jetstream.Pull(batch))
 	if err != nats.ErrSubjectMismatch {
 		t.Fatalf("Expected a %q error but got %q", nats.ErrSubjectMismatch, err)
 	}
@@ -430,7 +431,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 		js.Publish("bar", msg)
 	}
 
-	sub, err = js.SubscribeSync("bar", nats.Attach(mset.Name(), "rip"), nats.Pull(batch))
+	sub, err = js.SubscribeSync("bar", jetstream.Attach(mset.Name(), "rip"), jetstream.Pull(batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -445,7 +446,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	// Create a new pull based consumer.
 	batch = 1
 	msgs := make(chan *nats.Msg, 100)
-	sub, err = js.ChanSubscribe("baz", msgs, nats.Durable("dlc"), nats.Pull(batch))
+	sub, err = js.ChanSubscribe("baz", msgs, jetstream.Durable("dlc"), jetstream.Pull(batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestJetStreamImport(t *testing.T) {
 	defer nc.Close()
 
 	// Since we import with a prefix from above we can use that when creating our JS context.
-	js, err := nc.JetStream(nats.ApiPrefix("dlc"))
+	js, err := nc.JetStream(jetstream.ApiPrefix("dlc"))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -640,7 +641,7 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	}
 	defer nc.Close()
 
-	js, err := nc.JetStream(nats.DirectOnly())
+	js, err := nc.JetStream(jetstream.DirectOnly())
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -676,7 +677,7 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	}
 
 	// Do push based direct consumer.
-	sub, err = js.SubscribeSync("ORDERS", nats.PushDirect("p.d"))
+	sub, err = js.SubscribeSync("ORDERS", jetstream.PushDirect("p.d"))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -698,7 +699,7 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 
 	// Now pull based consumer.
 	batch := 10
-	sub, err = js.SubscribeSync("ORDERS", nats.PullDirect("ORDERS", "d1", batch))
+	sub, err = js.SubscribeSync("ORDERS", jetstream.PullDirect("ORDERS", "d1", batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -742,7 +743,7 @@ func TestJetStreamAutoMaxAckPending(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	toSend := 10_000
+	toSend := 10000
 
 	msg := []byte("Hello")
 	for i := 0; i < toSend; i++ {
@@ -844,7 +845,7 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 	}
 
 	msg := []byte("Hello JS!")
-	toSend := 100_000
+	toSend := 100000
 	for i := 0; i < toSend; i++ {
 		// Use plain NATS here for speed.
 		nc.Publish("STALL", msg)
@@ -857,7 +858,7 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 
 	batch := 100
 	msgs := make(chan *nats.Msg, batch-2)
-	sub, err := js.ChanSubscribe("STALL", msgs, nats.Durable("dlc"), nats.Pull(batch))
+	sub, err := js.ChanSubscribe("STALL", msgs, jetstream.Durable("dlc"), jetstream.Pull(batch))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

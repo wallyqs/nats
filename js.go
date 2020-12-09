@@ -15,7 +15,6 @@ package nats
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,21 +22,24 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // JetStream is the public interface for the JetStream context.
 type JetStream interface {
 	// Publishing messages to JetStream.
-	Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
-	PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error)
+	Publish(subj string, data []byte, opts ...jetstream.PubOpt) (*PubAck, error)
+	PublishMsg(m *Msg, opts ...jetstream.PubOpt) (*PubAck, error)
 
 	// Subscribing to messages in JetStream.
-	Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (*Subscription, error)
-	SubscribeSync(subj string, opts ...SubOpt) (*Subscription, error)
+	Subscribe(subj string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error)
+	SubscribeSync(subj string, opts ...jetstream.SubOpt) (*Subscription, error)
+
 	// Channel versions.
-	ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (*Subscription, error)
+	ChanSubscribe(subj string, ch chan *Msg, opts ...jetstream.SubOpt) (*Subscription, error)
 	// QueueSubscribe.
-	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (*Subscription, error)
+	QueueSubscribe(subj, queue string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error)
 
 	// Management
 	// TODO(dlc) - add more
@@ -45,46 +47,16 @@ type JetStream interface {
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
 }
 
-// ApiError is included in all API responses if there was an error.
-type ApiError struct {
-	Code        int    `json:"code"`
-	Description string `json:"description,omitempty"`
-}
-
-// ApiResponse is a standard response from the JetStream JSON API
-type ApiResponse struct {
-	Type  string    `json:"type"`
-	Error *ApiError `json:"error,omitempty"`
-}
-
-type AccountInfoResponse struct {
-	ApiResponse
-	*AccountStats
-}
-
-// AccountLimits is for the information about
-type AccountLimits struct {
-	MaxMemory    int64 `json:"max_memory"`
-	MaxStore     int64 `json:"max_storage"`
-	MaxStreams   int   `json:"max_streams"`
-	MaxConsumers int   `json:"max_consumers"`
-}
-
-// AccountStats returns current statistics about the account's JetStream usage.
-type AccountStats struct {
-	Memory  uint64        `json:"memory"`
-	Store   uint64        `json:"storage"`
-	Streams int           `json:"streams"`
-	Limits  AccountLimits `json:"limits"`
-}
-
 // Internal struct for jetstream
 type js struct {
 	nc *Conn
+
 	// For importing JetStream from other accounts.
 	pre string
+
 	// Amount of time to wait for API requests.
 	wait time.Duration
+
 	// Signals only direct access and no API access.
 	direct bool
 }
@@ -109,16 +81,20 @@ const (
 )
 
 // JetStream returns a JetStream context for pub/sub interactions.
-func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
+func (nc *Conn) JetStream(opts ...jetstream.Option) (JetStream, error) {
 	const defaultRequestWait = 5 * time.Second
 
-	js := &js{nc: nc, pre: JSDefaultApiPrefix, wait: defaultRequestWait}
+	js := &js{nc: nc}
 
+	o := &jetstream.Options{Prefix: JSDefaultApiPrefix, Wait: defaultRequestWait}
 	for _, f := range opts {
-		if err := f(js); err != nil {
+		if err := f(o); err != nil {
 			return nil, err
 		}
 	}
+	js.pre = o.Prefix
+	js.wait = o.Wait
+	js.direct = o.Direct
 
 	if js.direct {
 		return js, nil
@@ -141,33 +117,6 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 	return js, nil
 }
 
-// JSOpt configures options for the jetstream context.
-type JSOpt func(opts *js) error
-
-func ApiPrefix(pre string) JSOpt {
-	return func(js *js) error {
-		js.pre = pre
-		if !strings.HasSuffix(js.pre, ".") {
-			js.pre = js.pre + "."
-		}
-		return nil
-	}
-}
-
-func ApiRequestWait(wait time.Duration) JSOpt {
-	return func(js *js) error {
-		js.wait = wait
-		return nil
-	}
-}
-
-func DirectOnly() JSOpt {
-	return func(js *js) error {
-		js.direct = true
-		return nil
-	}
-}
-
 func (js *js) apiSubj(subj string) string {
 	if js.pre == _EMPTY_ {
 		return subj
@@ -176,18 +125,6 @@ func (js *js) apiSubj(subj string) string {
 	b.WriteString(js.pre)
 	b.WriteString(subj)
 	return b.String()
-}
-
-// PubOpt configures options for publishing jetstream messages.
-type PubOpt func(opts *pubOpts) error
-
-type pubOpts struct {
-	ctx context.Context
-	ttl time.Duration
-	id  string
-	lid string // Expected last msgId
-	str string // Expected stream name
-	seq uint64 // Expected last sequence
 }
 
 type PubAckResponse struct {
@@ -209,8 +146,8 @@ const (
 	ExpectedLastMsgIdHdr = "Nats-Expected-Last-Msg-Id"
 )
 
-func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
-	var o pubOpts
+func (js *js) PublishMsg(m *Msg, opts ...jetstream.PubOpt) (*PubAck, error) {
+	var o jetstream.PubOpts
 	if len(opts) > 0 {
 		if m.Header == nil {
 			m.Header = http.Header{}
@@ -221,34 +158,35 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 			}
 		}
 	}
+
 	// Check for option collisions. Right now just timeout and context.
-	if o.ctx != nil && o.ttl != 0 {
+	if o.Context != nil && o.Ttl != 0 {
 		return nil, ErrContextAndTimeout
 	}
-	if o.ttl == 0 && o.ctx == nil {
-		o.ttl = js.wait
+	if o.Ttl == 0 && o.Context == nil {
+		o.Ttl = js.wait
 	}
 
-	if o.id != _EMPTY_ {
-		m.Header.Set(MsgIdHdr, o.id)
+	if o.MsgId != _EMPTY_ {
+		m.Header.Set(MsgIdHdr, o.MsgId)
 	}
-	if o.lid != _EMPTY_ {
-		m.Header.Set(ExpectedLastMsgIdHdr, o.lid)
+	if o.LastMsgId != _EMPTY_ {
+		m.Header.Set(ExpectedLastMsgIdHdr, o.LastMsgId)
 	}
-	if o.str != _EMPTY_ {
-		m.Header.Set(ExpectedStreamHdr, o.str)
+	if o.Stream != _EMPTY_ {
+		m.Header.Set(ExpectedStreamHdr, o.Stream)
 	}
-	if o.seq > 0 {
-		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.seq, 10))
+	if o.Seq > 0 {
+		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.Seq, 10))
 	}
 
 	var resp *Msg
 	var err error
 
-	if o.ttl > 0 {
-		resp, err = js.nc.RequestMsg(m, o.ttl)
+	if o.Ttl > 0 {
+		resp, err = js.nc.RequestMsg(m, o.Ttl)
 	} else {
-		resp, err = js.nc.RequestMsgWithContext(o.ctx, m)
+		resp, err = js.nc.RequestMsgWithContext(o.Context, m)
 	}
 
 	if err != nil {
@@ -270,61 +208,10 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 	return pa.PubAck, nil
 }
 
-func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error) {
+func (js *js) Publish(subj string, data []byte, opts ...jetstream.PubOpt) (*PubAck, error) {
 	return js.PublishMsg(&Msg{Subject: subj, Data: data}, opts...)
 }
 
-// Options for publishing to JetStream.
-
-// MsgId sets the message ID used for de-duplication.
-func MsgId(id string) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.id = id
-		return nil
-	}
-}
-
-// ExpectStream sets the expected stream to respond from the publish.
-func ExpectStream(stream string) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.str = stream
-		return nil
-	}
-}
-
-// ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastSequence(seq uint64) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.seq = seq
-		return nil
-	}
-}
-
-// ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastMsgId(id string) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.lid = id
-		return nil
-	}
-}
-
-// MaxWait sets the maximum amount of time we will wait for a response from JetStream.
-func MaxWait(ttl time.Duration) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ttl = ttl
-		return nil
-	}
-}
-
-// Context sets the contect to make the call to JetStream.
-func Context(ctx context.Context) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ctx = ctx
-		return nil
-	}
-}
-
-// Subscribe
 // We will match subjects to streams and consumers on the user's behalf.
 
 type JSApiCreateConsumerRequest struct {
@@ -379,27 +266,24 @@ type NextRequest struct {
 	NoWait  bool       `json:"no_wait,omitempty"`
 }
 
-// SubOpt configures options for subscribing to JetStream consumers.
-type SubOpt func(opts *subOpts) error
-
 // Subscribe will create a subscription to the appropriate stream and consumer.
-func (js *js) Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (*Subscription, error) {
+func (js *js) Subscribe(subj string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error) {
 	return js.subscribe(subj, _EMPTY_, cb, nil, opts)
 }
 
 // SubscribeSync will create a sync subscription to the appropriate stream and consumer.
-func (js *js) SubscribeSync(subj string, opts ...SubOpt) (*Subscription, error) {
+func (js *js) SubscribeSync(subj string, opts ...jetstream.SubOpt) (*Subscription, error) {
 	mch := make(chan *Msg, js.nc.Opts.SubChanLen)
 	return js.subscribe(subj, _EMPTY_, nil, mch, opts)
 }
 
 // QueueSubscribe will create a subscription to the appropriate stream and consumer with queue semantics.
-func (js *js) QueueSubscribe(subj, queue string, cb MsgHandler, opts ...SubOpt) (*Subscription, error) {
+func (js *js) QueueSubscribe(subj, queue string, cb MsgHandler, opts ...jetstream.SubOpt) (*Subscription, error) {
 	return js.subscribe(subj, queue, cb, nil, opts)
 }
 
 // Subscribe will create a subscription to the appropriate stream and consumer.
-func (js *js) ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (*Subscription, error) {
+func (js *js) ChanSubscribe(subj string, ch chan *Msg, opts ...jetstream.SubOpt) (*Subscription, error) {
 	return js.subscribe(subj, _EMPTY_, nil, ch, opts)
 }
 
@@ -420,9 +304,8 @@ type JSApiStreamNamesResponse struct {
 	Streams []string `json:"streams"`
 }
 
-func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*Subscription, error) {
-	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
-	o := subOpts{cfg: &cfg}
+func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []jetstream.SubOpt) (*Subscription, error) {
+	o := jetstream.SubOpts{}
 	if len(opts) > 0 {
 		for _, f := range opts {
 			if err := f(&o); err != nil {
@@ -430,18 +313,20 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 			}
 		}
 	}
-
-	isPullMode := o.pull > 0
+	isPullMode := o.Pull > 0
 	if cb != nil && isPullMode {
 		return nil, ErrPullModeNotAllowed
 	}
+	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
+	cfg.DeliverSubject = o.DeliverSubject
+	cfg.Durable = o.Durable
 
 	var err error
 	var stream, deliver string
 	var ccfg *ConsumerConfig
 
 	// If we are attaching to an existing consumer.
-	shouldAttach := o.stream != _EMPTY_ && o.consumer != _EMPTY_ || o.cfg.DeliverSubject != _EMPTY_
+	shouldAttach := o.Stream != _EMPTY_ && o.Consumer != _EMPTY_ || o.DeliverSubject != _EMPTY_
 	shouldCreate := !shouldAttach
 
 	if js.direct && shouldCreate {
@@ -449,13 +334,13 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	}
 
 	if js.direct {
-		if o.cfg.DeliverSubject != _EMPTY_ {
-			deliver = o.cfg.DeliverSubject
+		if o.DeliverSubject != _EMPTY_ {
+			deliver = o.DeliverSubject
 		} else {
 			deliver = NewInbox()
 		}
 	} else if shouldAttach {
-		info, err := js.getConsumerInfo(o.stream, o.consumer)
+		info, err := js.getConsumerInfo(o.Stream, o.Consumer)
 		if err != nil {
 			return nil, err
 		}
@@ -486,7 +371,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	var sub *Subscription
 
 	// Check if we are manual ack.
-	if cb != nil && !o.mack {
+	if cb != nil && !o.ManualAck {
 		ocb := cb
 		cb = func(m *Msg) { ocb(m); m.Ack() }
 	}
@@ -552,10 +437,10 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		sub.jsi.consumer = info.Name
 		sub.jsi.deliver = info.Config.DeliverSubject
 	} else {
-		sub.jsi.stream = o.stream
-		sub.jsi.consumer = o.consumer
+		sub.jsi.stream = o.Stream
+		sub.jsi.consumer = o.Consumer
 		if js.direct {
-			sub.jsi.deliver = o.cfg.DeliverSubject
+			sub.jsi.deliver = o.DeliverSubject
 		} else {
 			sub.jsi.deliver = ccfg.DeliverSubject
 		}
@@ -563,7 +448,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 
 	// If we are pull based go ahead and fire off the first request to populate.
 	if isPullMode {
-		sub.jsi.pull = o.pull
+		sub.jsi.pull = o.Pull
 		sub.Poll()
 	}
 
@@ -592,68 +477,6 @@ func (js *js) lookupStreamBySubject(subj string) (string, error) {
 		return _EMPTY_, ErrNoMatchingStream
 	}
 	return slr.Streams[0], nil
-}
-
-type subOpts struct {
-	// For attaching.
-	stream, consumer string
-	// For pull based consumers, batch size for pull
-	pull int
-	// For manual ack
-	mack bool
-	// For creating or updating.
-	cfg *ConsumerConfig
-}
-
-func Durable(name string) SubOpt {
-	return func(opts *subOpts) error {
-		opts.cfg.Durable = name
-		return nil
-	}
-}
-
-func Attach(stream, consumer string) SubOpt {
-	return func(opts *subOpts) error {
-		opts.stream = stream
-		opts.consumer = consumer
-		return nil
-	}
-}
-
-func Pull(batchSize int) SubOpt {
-	return func(opts *subOpts) error {
-		if batchSize == 0 {
-			return errors.New("nats: batch size of 0 not valid")
-		}
-		opts.pull = batchSize
-		return nil
-	}
-}
-
-func PullDirect(stream, consumer string, batchSize int) SubOpt {
-	return func(opts *subOpts) error {
-		if batchSize == 0 {
-			return errors.New("nats: batch size of 0 not valid")
-		}
-		opts.stream = stream
-		opts.consumer = consumer
-		opts.pull = batchSize
-		return nil
-	}
-}
-
-func PushDirect(deliverSubject string) SubOpt {
-	return func(opts *subOpts) error {
-		opts.cfg.DeliverSubject = deliverSubject
-		return nil
-	}
-}
-
-func ManualAck() SubOpt {
-	return func(opts *subOpts) error {
-		opts.mack = true
-		return nil
-	}
 }
 
 func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
@@ -842,6 +665,39 @@ func parseNum(d string) (n int64) {
 }
 
 // Additional jetstream structures.
+
+// ApiError is included in all API responses if there was an error.
+type ApiError struct {
+	Code        int    `json:"code"`
+	Description string `json:"description,omitempty"`
+}
+
+// ApiResponse is a standard response from the JetStream JSON API
+type ApiResponse struct {
+	Type  string    `json:"type"`
+	Error *ApiError `json:"error,omitempty"`
+}
+
+type AccountInfoResponse struct {
+	ApiResponse
+	*AccountStats
+}
+
+// AccountLimits is for the information about
+type AccountLimits struct {
+	MaxMemory    int64 `json:"max_memory"`
+	MaxStore     int64 `json:"max_storage"`
+	MaxStreams   int   `json:"max_streams"`
+	MaxConsumers int   `json:"max_consumers"`
+}
+
+// AccountStats returns current statistics about the account's JetStream usage.
+type AccountStats struct {
+	Memory  uint64        `json:"memory"`
+	Store   uint64        `json:"storage"`
+	Streams int           `json:"streams"`
+	Limits  AccountLimits `json:"limits"`
+}
 
 type AckPolicy int
 
