@@ -829,6 +829,62 @@ func TestJetStreamAutoMaxAckPending(t *testing.T) {
 	}
 }
 
+func TestJetStreamOptions(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer s.Shutdown()
+
+	if config := s.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
+	// Create a stream using the server directly.
+	acc, _ := s.LookupAccount("$G")
+	mset, err := acc.AddStream(&server.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo", "bar"},
+	})
+	if err != nil {
+		t.Fatalf("stream create failed: %v", err)
+	}
+	defer mset.Delete()
+
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	msg := []byte("Hello JS Import!")
+
+	preset := nats.PubOpts(nats.ExpectStream("TEST"), nats.MaxWait(4*time.Second))
+	if _, err = js.Publish("foo", msg, preset); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+	if _, err = js.Publish("foo", msg, preset, nats.ExpectLastSequence(1)); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+	if _, err = js.Publish("foo", msg, preset, nats.ExpectLastSequence(2)); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+
+	sopts := nats.SubOpts(nats.Durable("example"))
+	sub, err := js.SubscribeSync("foo", sopts)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	_, err = sub.NextMsg(2*time.Second)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
 // WIP(dlc) - This is in support of stall based tests and processing.
 func TestJetStreamPullBasedStall(t *testing.T) {
 	t.SkipNow()

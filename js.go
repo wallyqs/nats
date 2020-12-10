@@ -148,7 +148,7 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 	return js, nil
 }
 
-// JSOpt configures options for the jetstream context.
+// JSOpt configures options for the JetStream context.
 type JSOpt func(opts *js) error
 
 func ApiPrefix(pre string) JSOpt {
@@ -185,18 +185,6 @@ func (js *js) apiSubj(subj string) string {
 	return b.String()
 }
 
-// PubOpt configures options for publishing jetstream messages.
-type PubOpt func(opts *pubOpts) error
-
-type pubOpts struct {
-	ctx context.Context
-	ttl time.Duration
-	id  string
-	lid string // Expected last msgId
-	str string // Expected stream name
-	seq uint64 // Expected last sequence
-}
-
 type PubAckResponse struct {
 	ApiResponse
 	*PubAck
@@ -222,10 +210,9 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		if m.Header == nil {
 			m.Header = http.Header{}
 		}
-		for _, f := range opts {
-			if err := f(&o); err != nil {
-				return nil, err
-			}
+		f := PubOpts(opts...)
+		if err := f(&o); err != nil {
+			return nil, err
 		}
 	}
 	// Check for option collisions. Right now just timeout and context.
@@ -281,7 +268,27 @@ func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
 	return js.PublishMsg(&Msg{Subject: subj, Data: data}, opts...)
 }
 
-// Options for publishing to JetStream.
+type pubOpts struct {
+	ctx context.Context
+	ttl time.Duration
+	id  string
+	lid string // Expected last msgId
+	str string // Expected stream name
+	seq uint64 // Expected last sequence
+}
+
+// PubOpt configures options for publishing jetstream messages.
+type PubOpt func(opts *pubOpts) error
+
+// PubOpts applies a set of options for publishing to JetStream.
+func PubOpts(opts ...PubOpt) PubOpt {
+	return func(o *pubOpts) error {
+		for _, fn := range opts {
+			fn(o)
+		}
+		return nil
+	}
+}
 
 // MsgId sets the message ID used for de-duplication.
 func MsgId(id string) PubOpt {
@@ -386,9 +393,6 @@ type NextRequest struct {
 	NoWait  bool       `json:"no_wait,omitempty"`
 }
 
-// SubOpt configures options for subscribing to JetStream consumers.
-type SubOpt func(opts *subOpts) error
-
 // Subscribe will create a subscription to the appropriate stream and consumer.
 func (js *js) Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (*Subscription, error) {
 	return js.subscribe(subj, _EMPTY_, cb, nil, opts)
@@ -431,10 +435,9 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
 	o := subOpts{cfg: &cfg}
 	if len(opts) > 0 {
-		for _, f := range opts {
-			if err := f(&o); err != nil {
-				return nil, err
-			}
+		f := SubOpts(opts...)
+		if err := f(&o); err != nil {
+			return nil, err
 		}
 	}
 
@@ -610,6 +613,19 @@ type subOpts struct {
 	mack bool
 	// For creating or updating.
 	cfg *ConsumerConfig
+}
+
+// SubOpt configures options for subscribing to JetStream consumers.
+type SubOpt func(opts *subOpts) error
+
+// SubOpts applies a set of options for subscribing to JetStream.
+func SubOpts(opts ...SubOpt) SubOpt {
+	return func(o *subOpts) error {
+		for _, fn := range opts {
+			fn(o)
+		}
+		return nil
+	}
 }
 
 func Durable(name string) SubOpt {
