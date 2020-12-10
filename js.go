@@ -277,63 +277,73 @@ type pubOpts struct {
 	seq uint64 // Expected last sequence
 }
 
-// PubOpt configures options for publishing jetstream messages.
+func (o *pubOpts) configure(opt fopt) error {
+	return opt(o)
+}
+
+// PubOpt configures options for publishing JetStream messages.
 type PubOpt func(opts *pubOpts) error
 
+type option interface {
+	configure(fopt) error
+}
+
+type fopt func(opts option) error
+
 // PubOpts applies a set of options for publishing to JetStream.
-func PubOpts(opts ...PubOpt) PubOpt {
-	return func(o *pubOpts) error {
+func PubOpts(opts ...PubOpt) fopt {
+	return func(o option) error {
 		for _, fn := range opts {
-			fn(o)
+			o.configure(fn)
 		}
 		return nil
 	}
 }
 
+// Context sets the contect to make the call to JetStream.
+func Context(ctx context.Context) fopt {
+	return func(o option) error {
+		o.ctx = ctx
+		return nil
+	}
+}
+
 // MsgId sets the message ID used for de-duplication.
-func MsgId(id string) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.id = id
+func MsgId(id string) fopt {
+	return func(o option) error {
+		o.id = id
 		return nil
 	}
 }
 
 // ExpectStream sets the expected stream to respond from the publish.
-func ExpectStream(stream string) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.str = stream
+func ExpectStream(stream string) fopt {
+	return func(o option) error {
+		o.str = stream
 		return nil
 	}
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastSequence(seq uint64) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.seq = seq
+func ExpectLastSequence(seq uint64) fopt {
+	return func(o option) error {
+		o.seq = seq
 		return nil
 	}
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastMsgId(id string) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.lid = id
+func ExpectLastMsgId(id string) fopt {
+	return func(o option) error {
+		o.lid = id
 		return nil
 	}
 }
 
 // MaxWait sets the maximum amount of time we will wait for a response from JetStream.
-func MaxWait(ttl time.Duration) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ttl = ttl
-		return nil
-	}
-}
-
-// Context sets the contect to make the call to JetStream.
-func Context(ctx context.Context) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ctx = ctx
+func MaxWait(ttl time.Duration) fopt {
+return func(o option) error {
+		o.ttl = ttl
 		return nil
 	}
 }
