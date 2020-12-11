@@ -192,15 +192,29 @@ func (js *js) apiSubj(subj string) string {
 }
 
 // PubOpt configures options for publishing jetstream messages.
-type PubOpt func(opts *pubOpts) error
+type PubOpt interface {
+	configurePublish(opts *pubOpts) error
+}
+
+type pubOpt func(opts *pubOpts) error
+
+func (opt pubOpt) configurePublish(opts *pubOpts) error {
+	return opt(opts)
+}
 
 type pubOpts struct {
 	ctx context.Context
-	ttl time.Duration
+	ttl MaxWait
 	id  string
 	lid string // Expected last msgId
 	str string // Expected stream name
 	seq uint64 // Expected last sequence
+}
+
+type ClientOption interface {
+	// configureConnect(*Options) error
+	configurePublish(*pubOpts) error
+	// configureSubscribe(*subOpts) error
 }
 
 type PubAckResponse struct {
@@ -229,7 +243,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 			m.Header = http.Header{}
 		}
 		for _, f := range opts {
-			if err := f(&o); err != nil {
+			if err := f.configurePublish(&o); err != nil {
 				return nil, err
 			}
 		}
@@ -239,7 +253,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		return nil, ErrContextAndTimeout
 	}
 	if o.ttl == 0 && o.ctx == nil {
-		o.ttl = js.wait
+		o.ttl = MaxWait(js.wait)
 	}
 
 	if o.id != _EMPTY_ {
@@ -259,7 +273,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 	var err error
 
 	if o.ttl > 0 {
-		resp, err = js.nc.RequestMsg(m, o.ttl)
+		resp, err = js.nc.RequestMsg(m, time.Duration(o.ttl))
 	} else {
 		resp, err = js.nc.RequestMsgWithContext(o.ctx, m)
 	}
@@ -290,7 +304,7 @@ func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
 // Options for publishing to JetStream.
 
 // MsgId sets the message ID used for de-duplication.
-func MsgId(id string) PubOpt {
+func MsgId(id string) pubOpt {
 	return func(opts *pubOpts) error {
 		opts.id = id
 		return nil
@@ -298,7 +312,7 @@ func MsgId(id string) PubOpt {
 }
 
 // ExpectStream sets the expected stream to respond from the publish.
-func ExpectStream(stream string) PubOpt {
+func ExpectStream(stream string) pubOpt {
 	return func(opts *pubOpts) error {
 		opts.str = stream
 		return nil
@@ -306,7 +320,7 @@ func ExpectStream(stream string) PubOpt {
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastSequence(seq uint64) PubOpt {
+func ExpectLastSequence(seq uint64) pubOpt {
 	return func(opts *pubOpts) error {
 		opts.seq = seq
 		return nil
@@ -314,27 +328,71 @@ func ExpectLastSequence(seq uint64) PubOpt {
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastMsgId(id string) PubOpt {
+func ExpectLastMsgId(id string) pubOpt {
 	return func(opts *pubOpts) error {
 		opts.lid = id
 		return nil
 	}
 }
 
-// MaxWait sets the maximum amount of time we will wait for a response from JetStream.
-func MaxWait(ttl time.Duration) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ttl = ttl
-		return nil
-	}
+// func MaxWait(ttl time.Duration) pubOpt {
+// 	return func(opts *pubOpts) error {
+// 		opts.ttl = ttl
+// 		return nil
+// 	}
+// }
+
+// MaxWait sets the maximum amount of time we will wait for a response.
+type MaxWait time.Duration
+
+// configurePublish sets the maximum amount of time we will wait for a publish.
+func (ttl MaxWait) configurePublish(opts *pubOpts) error {
+	opts.ttl = ttl
+	return nil
 }
 
-// Context sets the contect to make the call to JetStream.
-func Context(ctx context.Context) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ctx = ctx
-		return nil
-	}
+// Context can be used to set a context.
+//
+// nope:
+// 
+// type Context int
+
+// type natsCtx context.Context
+
+// func (ctx Context) configurePublish(opts *pubOpts) error {
+// 	opts.ctx = ctx
+// 	return nil
+// }
+
+// type natsCtx struct {
+// 	context.Context
+// }
+
+// type Context natsCtx
+
+// func (ctx *natsCtx) configurePublish(opts *pubOpts) error {
+// 	opts.ctx = Context(*ctx)
+// 	return nil
+// }
+
+// func Context(ctx context.Context) pubOpt {
+// 	return func(opts *pubOpts) error {
+// 		opts.ctx = ctx
+// 		return nil
+// 	}
+// }
+
+type natsCtx struct {
+	ctx context.Context
+}
+
+func (ctx natsCtx) configurePublish(opts *pubOpts) error {
+	opts.ctx = ctx.ctx
+	return nil
+}
+
+func CustomContext(ctx context.Context) natsCtx {
+	return natsCtx{ctx: ctx}
 }
 
 // Subscribe
