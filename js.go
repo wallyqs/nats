@@ -121,8 +121,8 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 
 	js := &js{nc: nc, pre: JSDefaultAPIPrefix, wait: defaultRequestWait}
 
-	for _, f := range opts {
-		if err := f(js); err != nil {
+	for _, opt := range opts {
+		if err := opt.configureJSContext(js); err != nil {
 			return nil, err
 		}
 	}
@@ -148,10 +148,19 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStream, error) {
 	return js, nil
 }
 
-// JSOpt configures options for the jetstream context.
-type JSOpt func(opts *js) error
+// JSOpt configures a JetStream context.
+type JSOpt interface {
+	configureJSContext(opts *js) error
+}
 
-func APIPrefix(pre string) JSOpt {
+// JSOptFn configures an option for the JetStream context.
+type JSOptFn func(opts *js) error
+
+func (opt JSOptFn) configureJSContext(opts *js) error {
+	return opt(opts)
+}
+
+func APIPrefix(pre string) JSOptFn {
 	return func(js *js) error {
 		js.pre = pre
 		if !strings.HasSuffix(js.pre, ".") {
@@ -161,14 +170,7 @@ func APIPrefix(pre string) JSOpt {
 	}
 }
 
-func APIRequestWait(wait time.Duration) JSOpt {
-	return func(js *js) error {
-		js.wait = wait
-		return nil
-	}
-}
-
-func DirectOnly() JSOpt {
+func DirectOnly() JSOptFn {
 	return func(js *js) error {
 		js.direct = true
 		return nil
@@ -185,8 +187,17 @@ func (js *js) apiSubj(subj string) string {
 	return b.String()
 }
 
-// PubOpt configures options for publishing jetstream messages.
-type PubOpt func(opts *pubOpts) error
+// PubOpt configures options for publishing JetStream messages.
+type PubOpt interface {
+	configurePublish(opts *pubOpts) error
+}
+
+// PubOptFn is a function option used to configure JetStream Publish.
+type PubOptFn func(opts *pubOpts) error
+
+func (opt PubOptFn) configurePublish(opts *pubOpts) error {
+	return opt(opts)
+}
 
 type pubOpts struct {
 	ctx context.Context
@@ -222,8 +233,8 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		if m.Header == nil {
 			m.Header = http.Header{}
 		}
-		for _, f := range opts {
-			if err := f(&o); err != nil {
+		for _, opt := range opts {
+			if err := opt.configurePublish(&o); err != nil {
 				return nil, err
 			}
 		}
@@ -253,7 +264,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 	var err error
 
 	if o.ttl > 0 {
-		resp, err = js.nc.RequestMsg(m, o.ttl)
+		resp, err = js.nc.RequestMsg(m, time.Duration(o.ttl))
 	} else {
 		resp, err = js.nc.RequestMsgWithContext(o.ctx, m)
 	}
@@ -284,7 +295,7 @@ func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
 // Options for publishing to JetStream.
 
 // MsgId sets the message ID used for de-duplication.
-func MsgId(id string) PubOpt {
+func MsgId(id string) PubOptFn {
 	return func(opts *pubOpts) error {
 		opts.id = id
 		return nil
@@ -292,7 +303,7 @@ func MsgId(id string) PubOpt {
 }
 
 // ExpectStream sets the expected stream to respond from the publish.
-func ExpectStream(stream string) PubOpt {
+func ExpectStream(stream string) PubOptFn {
 	return func(opts *pubOpts) error {
 		opts.str = stream
 		return nil
@@ -300,7 +311,7 @@ func ExpectStream(stream string) PubOpt {
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastSequence(seq uint64) PubOpt {
+func ExpectLastSequence(seq uint64) PubOptFn {
 	return func(opts *pubOpts) error {
 		opts.seq = seq
 		return nil
@@ -308,27 +319,39 @@ func ExpectLastSequence(seq uint64) PubOpt {
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
-func ExpectLastMsgId(id string) PubOpt {
+func ExpectLastMsgId(id string) PubOptFn {
 	return func(opts *pubOpts) error {
 		opts.lid = id
 		return nil
 	}
 }
 
-// MaxWait sets the maximum amount of time we will wait for a response from JetStream.
-func MaxWait(ttl time.Duration) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ttl = ttl
-		return nil
-	}
+// MaxWait sets the maximum amount of time we will wait for a response.
+type MaxWait time.Duration
+
+func (ttl MaxWait) configurePublish(opts *pubOpts) error {
+	opts.ttl = time.Duration(ttl)
+	return nil
 }
 
-// Context sets the contect to make the call to JetStream.
-func Context(ctx context.Context) PubOpt {
-	return func(opts *pubOpts) error {
-		opts.ctx = ctx
-		return nil
-	}
+func (ttl MaxWait) configureJSContext(js *js) error {
+	js.wait = time.Duration(ttl)
+	return nil
+}
+
+// ContextOpt is an option used to set a context.Context.
+type ContextOpt struct {
+	ctx context.Context
+}
+
+func (ctx ContextOpt) configurePublish(opts *pubOpts) error {
+	opts.ctx = ctx.ctx
+	return nil
+}
+
+// Context returns an option that can be used to configure a context.
+func Context(ctx context.Context) ContextOpt {
+	return ContextOpt{ctx: ctx}
 }
 
 // Subscribe
@@ -387,7 +410,16 @@ type NextRequest struct {
 }
 
 // SubOpt configures options for subscribing to JetStream consumers.
-type SubOpt func(opts *subOpts) error
+type SubOpt interface {
+	configureSubscribe(opts *subOpts) error
+}
+
+// SubOptFn is a function option used to configure a JetStream Subscribe.
+type SubOptFn func(opts *subOpts) error
+
+func (opt SubOptFn) configureSubscribe(opts *subOpts) error {
+	return opt(opts)
+}
 
 // Subscribe will create a subscription to the appropriate stream and consumer.
 func (js *js) Subscribe(subj string, cb MsgHandler, opts ...SubOpt) (*Subscription, error) {
@@ -431,8 +463,8 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
 	o := subOpts{cfg: &cfg}
 	if len(opts) > 0 {
-		for _, f := range opts {
-			if err := f(&o); err != nil {
+		for _, opt := range opts {
+			if err := opt.configureSubscribe(&o); err != nil {
 				return nil, err
 			}
 		}
@@ -612,14 +644,14 @@ type subOpts struct {
 	cfg *ConsumerConfig
 }
 
-func Durable(name string) SubOpt {
+func Durable(name string) SubOptFn {
 	return func(opts *subOpts) error {
 		opts.cfg.Durable = name
 		return nil
 	}
 }
 
-func Attach(stream, consumer string) SubOpt {
+func Attach(stream, consumer string) SubOptFn {
 	return func(opts *subOpts) error {
 		opts.stream = stream
 		opts.consumer = consumer
@@ -627,7 +659,7 @@ func Attach(stream, consumer string) SubOpt {
 	}
 }
 
-func Pull(batchSize int) SubOpt {
+func Pull(batchSize int) SubOptFn {
 	return func(opts *subOpts) error {
 		if batchSize == 0 {
 			return errors.New("nats: batch size of 0 not valid")
@@ -637,7 +669,7 @@ func Pull(batchSize int) SubOpt {
 	}
 }
 
-func PullDirect(stream, consumer string, batchSize int) SubOpt {
+func PullDirect(stream, consumer string, batchSize int) SubOptFn {
 	return func(opts *subOpts) error {
 		if batchSize == 0 {
 			return errors.New("nats: batch size of 0 not valid")
@@ -649,14 +681,14 @@ func PullDirect(stream, consumer string, batchSize int) SubOpt {
 	}
 }
 
-func PushDirect(deliverSubject string) SubOpt {
+func PushDirect(deliverSubject string) SubOptFn {
 	return func(opts *subOpts) error {
 		opts.cfg.DeliverSubject = deliverSubject
 		return nil
 	}
 }
 
-func ManualAck() SubOpt {
+func ManualAck() SubOptFn {
 	return func(opts *subOpts) error {
 		opts.mack = true
 		return nil
