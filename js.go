@@ -127,8 +127,8 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStreamContext, error) {
 
 	js := &js{nc: nc, pre: JSDefaultAPIPrefix, wait: defaultRequestWait}
 
-	for _, f := range opts {
-		if err := f(js); err != nil {
+	for _, opt := range opts {
+		if err := opt.configureJSContext(js); err != nil {
 			return nil, err
 		}
 	}
@@ -154,10 +154,19 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStreamContext, error) {
 	return js, nil
 }
 
-// JSOpt configures options for the jetstream context.
-type JSOpt func(opts *js) error
+// JSOpt configures a JetStream context.
+type JSOpt interface {
+	configureJSContext(opts *js) error
+}
 
-func APIPrefix(pre string) JSOpt {
+// JSOptFn configures an option for the JetStream context.
+type JSOptFn func(opts *js) error
+
+func (opt JSOptFn) configureJSContext(opts *js) error {
+	return opt(opts)
+}
+
+func APIPrefix(pre string) JSOptFn {
 	return func(js *js) error {
 		js.pre = pre
 		if !strings.HasSuffix(js.pre, ".") {
@@ -167,14 +176,7 @@ func APIPrefix(pre string) JSOpt {
 	}
 }
 
-func APIRequestWait(wait time.Duration) JSOpt {
-	return func(js *js) error {
-		js.wait = wait
-		return nil
-	}
-}
-
-func DirectOnly() JSOpt {
+func DirectOnly() JSOptFn {
 	return func(js *js) error {
 		js.direct = true
 		return nil
@@ -333,9 +335,13 @@ func ExpectLastMsgId(id string) PubOptFn {
 // MaxWait sets the maximum amount of time we will wait for a response.
 type MaxWait time.Duration
 
-// configurePublish sets the maximum amount of time we will wait for a publish.
 func (ttl MaxWait) configurePublish(opts *pubOpts) error {
 	opts.ttl = time.Duration(ttl)
+	return nil
+}
+
+func (ttl MaxWait) configureJSContext(js *js) error {
+	js.wait = time.Duration(ttl)
 	return nil
 }
 

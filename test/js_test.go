@@ -513,7 +513,8 @@ func TestJetStreamManagement(t *testing.T) {
 	}
 	defer nc.Close()
 
-	js, err := nc.JetStream()
+	// Can set a custom timeout for the API calls.
+	js, err := nc.JetStream(nats.MaxWait(3*time.Second))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
