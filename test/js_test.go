@@ -200,8 +200,7 @@ func TestJetStreamPublish(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	// _, err = js.Publish("foo", msg, nats.MaxWait(time.Second), nats.Context{ctx})
-	_, err = js.Publish("foo", msg, nats.MaxWait(time.Second), nats.CustomContext(ctx))
+	_, err = js.Publish("foo", msg, nats.MaxWait(time.Second), nats.Context(ctx))
 	if err != nats.ErrContextAndTimeout {
 		t.Fatalf("Expected %q, got %q", nats.ErrContextAndTimeout, err)
 	}
@@ -216,8 +215,7 @@ func TestJetStreamPublish(t *testing.T) {
 	}
 
 	go cancel()
-	// _, err = js.Publish("baz", msg, nats.Context{ctx})
-	_, err = js.Publish("baz", msg, nats.CustomContext(ctx))
+	_, err = js.Publish("baz", msg, nats.Context(ctx))
 	if err != context.Canceled {
 		t.Fatalf("Expected %q, got %q", context.Canceled, err)
 	}

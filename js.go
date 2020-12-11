@@ -205,7 +205,7 @@ func (opt PubOptFn) configurePublish(opts *pubOpts) error {
 
 type pubOpts struct {
 	ctx context.Context
-	ttl MaxWait
+	ttl time.Duration
 	id  string
 	lid string // Expected last msgId
 	str string // Expected stream name
@@ -248,7 +248,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		return nil, ErrContextAndTimeout
 	}
 	if o.ttl == 0 && o.ctx == nil {
-		o.ttl = MaxWait(js.wait)
+		o.ttl = js.wait
 	}
 
 	if o.id != _EMPTY_ {
@@ -335,52 +335,23 @@ type MaxWait time.Duration
 
 // configurePublish sets the maximum amount of time we will wait for a publish.
 func (ttl MaxWait) configurePublish(opts *pubOpts) error {
-	opts.ttl = ttl
+	opts.ttl = time.Duration(ttl)
 	return nil
 }
 
-// Context can be used to set a context.
-//
-// nope:
-// 
-// type Context int
-
-// type natsCtx context.Context
-
-// func (ctx Context) configurePublish(opts *pubOpts) error {
-// 	opts.ctx = ctx
-// 	return nil
-// }
-
-// type natsCtx struct {
-// 	context.Context
-// }
-
-// type Context natsCtx
-
-// func (ctx *natsCtx) configurePublish(opts *pubOpts) error {
-// 	opts.ctx = Context(*ctx)
-// 	return nil
-// }
-
-// func Context(ctx context.Context) pubOpt {
-// 	return func(opts *pubOpts) error {
-// 		opts.ctx = ctx
-// 		return nil
-// 	}
-// }
-
-type natsCtx struct {
+// ContextOpt is an option used to set a context.Context.
+type ContextOpt struct {
 	ctx context.Context
 }
 
-func (ctx natsCtx) configurePublish(opts *pubOpts) error {
+func (ctx ContextOpt) configurePublish(opts *pubOpts) error {
 	opts.ctx = ctx.ctx
 	return nil
 }
 
-func CustomContext(ctx context.Context) natsCtx {
-	return natsCtx{ctx: ctx}
+// Context returns an option that can be used to configure a context.
+func Context(ctx context.Context) ContextOpt {
+	return ContextOpt{ctx: ctx}
 }
 
 // Subscribe
