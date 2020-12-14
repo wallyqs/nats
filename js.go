@@ -189,13 +189,13 @@ func (js *js) apiSubj(subj string) string {
 
 // PubOpt configures options for publishing JetStream messages.
 type PubOpt interface {
-	configurePublish(opts *pubOpts) error
+	configurePublish(opts *PubOptions) error
 }
 
-// pubOptFn is a function option used to configure JetStream Publish.
-type pubOptFn func(opts *pubOpts) error
+// PubOptFn is a function option used to configure JetStream Publish.
+type PubOptFn func(opts *PubOptions) error
 
-func (opt pubOptFn) configurePublish(opts *pubOpts) error {
+func (opt PubOptFn) configurePublish(opts *PubOptions) error {
 	return opt(opts)
 }
 
@@ -210,32 +210,32 @@ type pubOpts struct {
 
 // PubOptions can be used to configure a Publish with a struct.
 type PubOptions struct {
-	// Context is the 
-	Context      context.Context
+	// Context is the
+	Context context.Context
 
 	// MaxWait is the maximum time to wait for a publish response.
-	MaxWait      time.Duration
+	MaxWait time.Duration
 
 	// MsgID is the ID for a message.
-	MsgID        string
+	MsgID string
 
 	// LastMsgID is the expected last message ID.
-	LastMsgID    string
+	LastMsgID string
 
 	// Stream is the expected stream name.
-	Stream       string
+	Stream string
 
 	// LastSequence is the expected last message sequence.
 	LastSequence uint64
 }
 
-func (popts PubOptions) configurePublish(opts *pubOpts) error {
-	opts.ctx = popts.Context
-	opts.ttl = popts.MaxWait
-	opts.id = popts.MsgID
-	opts.lid = popts.LastMsgID
-	opts.str = popts.Stream
-	opts.seq = popts.LastSequence
+func (popts PubOptions) configurePublish(opts *PubOptions) error {
+	opts.Context = popts.Context
+	opts.MaxWait = popts.MaxWait
+	opts.MsgID = popts.MsgID
+	opts.LastMsgID = popts.LastMsgID
+	opts.Stream = popts.Stream
+	opts.LastSequence = popts.LastSequence
 	return nil
 }
 
@@ -259,7 +259,7 @@ const (
 )
 
 func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
-	var o pubOpts
+	var o PubOptions
 	if len(opts) > 0 {
 		if m.Header == nil {
 			m.Header = http.Header{}
@@ -271,33 +271,33 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		}
 	}
 	// Check for option collisions. Right now just timeout and context.
-	if o.ctx != nil && o.ttl != 0 {
+	if o.Context != nil && o.MaxWait != 0 {
 		return nil, ErrContextAndTimeout
 	}
-	if o.ttl == 0 && o.ctx == nil {
-		o.ttl = js.wait
+	if o.MaxWait == 0 && o.Context == nil {
+		o.MaxWait = js.wait
 	}
 
-	if o.id != _EMPTY_ {
-		m.Header.Set(MsgIdHdr, o.id)
+	if o.MsgID != _EMPTY_ {
+		m.Header.Set(MsgIdHdr, o.MsgID)
 	}
-	if o.lid != _EMPTY_ {
-		m.Header.Set(ExpectedLastMsgIdHdr, o.lid)
+	if o.LastMsgID != _EMPTY_ {
+		m.Header.Set(ExpectedLastMsgIdHdr, o.LastMsgID)
 	}
-	if o.str != _EMPTY_ {
-		m.Header.Set(ExpectedStreamHdr, o.str)
+	if o.Stream != _EMPTY_ {
+		m.Header.Set(ExpectedStreamHdr, o.Stream)
 	}
-	if o.seq > 0 {
-		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.seq, 10))
+	if o.LastSequence > 0 {
+		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.LastSequence, 10))
 	}
 
 	var resp *Msg
 	var err error
 
-	if o.ttl > 0 {
-		resp, err = js.nc.RequestMsg(m, time.Duration(o.ttl))
+	if o.MaxWait > 0 {
+		resp, err = js.nc.RequestMsg(m, time.Duration(o.MaxWait))
 	} else {
-		resp, err = js.nc.RequestMsgWithContext(o.ctx, m)
+		resp, err = js.nc.RequestMsgWithContext(o.Context, m)
 	}
 
 	if err != nil {
@@ -327,32 +327,32 @@ func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
 
 // MsgId sets the message ID used for de-duplication.
 func MsgId(id string) PubOpt {
-	return pubOptFn(func(opts *pubOpts) error {
-		opts.id = id
+	return PubOptFn(func(opts *PubOptions) error {
+		opts.MsgID = id
 		return nil
 	})
 }
 
 // ExpectStream sets the expected stream to respond from the publish.
 func ExpectStream(stream string) PubOpt {
-	return pubOptFn(func(opts *pubOpts) error {
-		opts.str = stream
+	return PubOptFn(func(opts *PubOptions) error {
+		opts.Stream = stream
 		return nil
 	})
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
 func ExpectLastSequence(seq uint64) PubOpt {
-	return pubOptFn(func(opts *pubOpts) error {
-		opts.seq = seq
+	return PubOptFn(func(opts *PubOptions) error {
+		opts.LastSequence = seq
 		return nil
 	})
 }
 
 // ExpectLastSequence sets the expected sequence in the response from the publish.
 func ExpectLastMsgId(id string) PubOpt {
-	return pubOptFn(func(opts *pubOpts) error {
-		opts.lid = id
+	return PubOptFn(func(opts *PubOptions) error {
+		opts.LastMsgID = id
 		return nil
 	})
 }
@@ -360,8 +360,8 @@ func ExpectLastMsgId(id string) PubOpt {
 // MaxWait sets the maximum amount of time we will wait for a response.
 type MaxWait time.Duration
 
-func (ttl MaxWait) configurePublish(opts *pubOpts) error {
-	opts.ttl = time.Duration(ttl)
+func (ttl MaxWait) configurePublish(opts *PubOptions) error {
+	opts.MaxWait = time.Duration(ttl)
 	return nil
 }
 
@@ -375,8 +375,8 @@ type ContextOpt struct {
 	context.Context
 }
 
-func (ctx ContextOpt) configurePublish(opts *pubOpts) error {
-	opts.ctx = ctx
+func (ctx ContextOpt) configurePublish(opts *PubOptions) error {
+	opts.Context = ctx
 	return nil
 }
 

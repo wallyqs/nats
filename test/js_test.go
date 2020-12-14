@@ -958,10 +958,23 @@ func TestJetStreamPublishOptions(t *testing.T) {
 	if _, err = js.Publish("foo", msg, nats.ExpectStream("TEST"), nats.MaxWait(4*time.Second)); err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
 	}
-	
+
 	// Collection of options (similar to some nats.Connect usage)
 	streamNameAndTimeout := []nats.PubOpt{nats.MaxWait(4*time.Second), nats.ExpectStream("TEST")}
 	if _, err = js.Publish("foo", msg, streamNameAndTimeout...); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+
+	// Custom functional option that does implement PubOpt interface.
+	withNameAndTimeout := func(name string, ttl time.Duration) nats.PubOpt {
+		return nats.PubOptFn(func(opts *nats.PubOptions) error {
+			// t.Logf("Configuring my own JS NATS publish...")
+			opts.Stream = name
+			opts.MaxWait = ttl
+			return nil
+		})
+	}
+	if _, err = js.Publish("foo", msg, withNameAndTimeout("TEST", 2*time.Second)); err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
 	}
 }
