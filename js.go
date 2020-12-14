@@ -208,6 +208,37 @@ type pubOpts struct {
 	seq uint64 // Expected last sequence
 }
 
+// PubOptions can be used to configure a Publish with a struct.
+type PubOptions struct {
+	// Context is the 
+	Context      context.Context
+
+	// MaxWait is the maximum time to wait for a publish response.
+	MaxWait      time.Duration
+
+	// MsgID is the ID for a message.
+	MsgID        string
+
+	// LastMsgID is the expected last message ID.
+	LastMsgID    string
+
+	// Stream is the expected stream name.
+	Stream       string
+
+	// LastSequence is the expected last message sequence.
+	LastSequence uint64
+}
+
+func (popts PubOptions) configurePublish(opts *pubOpts) error {
+	opts.ctx = popts.Context
+	opts.ttl = popts.MaxWait
+	opts.id = popts.MsgID
+	opts.lid = popts.LastMsgID
+	opts.str = popts.Stream
+	opts.seq = popts.LastSequence
+	return nil
+}
+
 type PubAckResponse struct {
 	APIResponse
 	*PubAck

@@ -913,3 +913,55 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 		}
 	}
 }
+
+func TestJetStreamPublishOptions(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer s.Shutdown()
+
+	if config := s.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	// Since we import with a prefix from above we can use that when creating our JS context.
+	js, err := nc.JetStream(nats.MaxWait(2*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// Create the stream using our client API.
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"test", "foo", "bar"},
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// Following are all the same:
+
+	// Using a single struct another using a set of functional options.
+	msg := []byte("Hello JS Import!")
+	if _, err = js.Publish("foo", msg, &nats.PubOptions{Stream: "TEST", MaxWait: 4*time.Second}); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+	if _, err = js.Publish("foo", msg, &nats.PubOptions{Stream: "BAR"}); err == nil {
+		t.Fatalf("Expected error due to unmatched stream name")
+	}
+
+	// Using functional options.
+	if _, err = js.Publish("foo", msg, nats.ExpectStream("TEST"), nats.MaxWait(4*time.Second)); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+	
+	// Collection of options (similar to some nats.Connect usage)
+	streamNameAndTimeout := []nats.PubOpt{nats.MaxWait(4*time.Second), nats.ExpectStream("TEST")}
+	if _, err = js.Publish("foo", msg, streamNameAndTimeout...); err != nil {
+		t.Fatalf("Unexpected publish error: %v", err)
+	}
+}
