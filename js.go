@@ -199,15 +199,6 @@ func (opt PubOptFn) configurePublish(opts *PubOptions) error {
 	return opt(opts)
 }
 
-type pubOpts struct {
-	ctx context.Context
-	ttl time.Duration
-	id  string
-	lid string // Expected last msgId
-	str string // Expected stream name
-	seq uint64 // Expected last sequence
-}
-
 // PubOptions can be used to configure a Publish with a struct.
 type PubOptions struct {
 	// Context is the
