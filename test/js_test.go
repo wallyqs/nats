@@ -922,7 +922,12 @@ func TestJetStreamOptions(t *testing.T) {
 		defer os.RemoveAll(config.StoreDir)
 	}
 
-	nc, err := nats.Connect(s.ClientURL())
+	custom := nats.ConnectOptions(&nats.Options{
+		Url: s.ClientURL(),
+		RetryOnFailedConnect: true,
+		UseOldRequestStyle: true,
+	}, nats.Timeout(10*time.Second))
+	nc, err := nats.Connect(s.ClientURL(), custom)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

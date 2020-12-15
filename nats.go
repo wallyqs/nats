@@ -227,6 +227,14 @@ type asyncCallbacksHandler struct {
 // Option is a function on the options for a connection.
 type Option func(*Options) error
 
+func (opt Option) configureConnect(opts *Options) error {
+	err := opt(opts)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // CustomDialer can be used to specify any dialer, not necessarily
 // a *net.Dialer.
 type CustomDialer interface {
@@ -418,6 +426,12 @@ type Options struct {
 	RetryOnFailedConnect bool
 }
 
+func (o *Options) configureConnect(opts *Options) error {
+	// NOTE: Have to do merge instead of replace.
+	*opts = *o
+	return nil
+}
+
 const (
 	// Scratch storage for assembling protocol headers
 	scratchSize = 512
@@ -437,6 +451,23 @@ const (
 	// Default port used if none is specified in given URL(s)
 	defaultPortString = "4222"
 )
+
+// ConnectOpt configures NATS connect.
+type ConnectOpt interface {
+	configureConnect(*Options) error
+}
+
+func ConnectOptions(opts ...ConnectOpt) Option {
+	return func(o *Options) error {
+		for _, opt := range opts {
+			err := opt.configureConnect(o)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
 
 // A Conn represents a bare connection to a nats-server.
 // It can send and receive []byte payloads.
@@ -663,6 +694,7 @@ func Connect(url string, options ...Option) (*Conn, error) {
 			}
 		}
 	}
+	fmt.Printf("%+v\n", opts)
 	return opts.Connect()
 }
 
