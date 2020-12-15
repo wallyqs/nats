@@ -914,7 +914,7 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 	}
 }
 
-func TestJetStreamPublishOptions(t *testing.T) {
+func TestJetStreamOptions(t *testing.T) {
 	s := RunBasicJetStreamServer()
 	defer s.Shutdown()
 
@@ -957,6 +957,11 @@ func TestJetStreamPublishOptions(t *testing.T) {
 	// Using functional options.
 	if _, err = js.Publish("foo", msg, nats.ExpectStream("TEST"), nats.MaxWait(4*time.Second)); err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
+	}
+
+	// Using nats.Timeout which is the same.
+	if _, err = js.Publish("foo", msg, nats.ExpectStream("TEST"), nats.Timeout(1*time.Nanosecond)); err == nil {
+		t.Fatalf("Expected publish timeout error: %v", err)
 	}
 
 	// Collection of options (similar to some nats.Connect usage)

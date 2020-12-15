@@ -239,6 +239,17 @@ func (popts PubOptions) configurePublish(opts *PubOptions) error {
 	return nil
 }
 
+// nats.Option also implements PubOpt
+func (opt Option) configurePublish(opts *PubOptions) error {
+	o := Options{}
+	err := opt(&o)
+	if err != nil {
+		return err
+	}
+	opts.MaxWait = o.Timeout
+	return nil
+}
+
 type PubAckResponse struct {
 	APIResponse
 	*PubAck
