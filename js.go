@@ -45,11 +45,11 @@ type JetStream interface {
 // JetStreamManager is the public interface for managing JetStream streams & consumers.
 type JetStreamManager interface {
 	// Create a stream.
-	AddStream(cfg *StreamConfig) (*StreamInfo, error)
+	AddStream(cfg *jetstream.StreamConfig) (*StreamInfo, error)
 	// Create a consumer.
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
 	// Stream information.
-	StreamInfo(stream string) (*StreamInfo, error)
+	StreamInfo(stream string) (*jetstream.StreamInfo, error)
 }
 
 // JetStream is the public interface for the JetStream context.
@@ -353,11 +353,47 @@ type PubAck struct {
 }
 
 type StreamConfig struct {
-	jetstream.StreamConfig
+	Name         string          `json:"name"`
+	Subjects     []string        `json:"subjects,omitempty"`
+	Retention    jetstream.RetentionPolicy `json:"retention"`
+	MaxConsumers int             `json:"max_consumers"`
+	MaxMsgs      int64           `json:"max_msgs"`
+	MaxBytes     int64           `json:"max_bytes"`
+	Discard      jetstream.DiscardPolicy   `json:"discard"`
+	MaxAge       time.Duration   `json:"max_age"`
+	MaxMsgSize   int32           `json:"max_msg_size,omitempty"`
+	Storage      jetstream.StorageType     `json:"storage"`
+	Replicas     int             `json:"num_replicas"`
+	NoAck        bool            `json:"no_ack,omitempty"`
+	Template     string          `json:"template_owner,omitempty"`
+	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
 }
 
+// JSApiStreamCreateResponse stream creation.
+// TODO: Try to move to own package
+type JSApiStreamCreateResponse struct {
+	jetstream.APIResponse
+	*StreamInfo
+}
+
+type JSApiStreamInfoResponse = JSApiStreamCreateResponse
+
+// StreamInfo shows config and current state for this stream.
 type StreamInfo struct {
-	jetstream.StreamInfo
+	Config  StreamConfig `json:"config"`
+	Created time.Time    `json:"created"`
+	State   StreamState  `json:"state"`
+}
+
+// StreamStats is information about the given stream.
+type StreamState struct {
+	Msgs      uint64    `json:"messages"`
+	Bytes     uint64    `json:"bytes"`
+	FirstSeq  uint64    `json:"first_seq"`
+	FirstTime time.Time `json:"first_ts"`
+	LastSeq   uint64    `json:"last_seq"`
+	LastTime  time.Time `json:"last_ts"`
+	Consumers int       `json:"consumer_count"`
 }
 
 type ConsumerInfo struct {
@@ -946,14 +982,14 @@ func (js *js) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp jetstream.JSApiStreamCreateResponse
+	var resp JSApiStreamCreateResponse
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Error != nil {
 		return nil, errors.New(resp.Error.Description)
 	}
-	return &StreamInfo{*resp.StreamInfo}, nil
+	return resp.StreamInfo, nil
 }
 
 func (js *js) StreamInfo(stream string) (*StreamInfo, error) {
@@ -962,12 +998,12 @@ func (js *js) StreamInfo(stream string) (*StreamInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp jetstream.JSApiStreamInfoResponse
+	var resp JSApiStreamInfoResponse
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Error != nil {
 		return nil, errors.New(resp.Error.Description)
 	}
-	return &StreamInfo{*resp.StreamInfo}, nil
+	return resp.StreamInfo, nil
 }

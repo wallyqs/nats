@@ -54,12 +54,12 @@ type PubAck struct {
 }
 
 // JSApiStreamCreateResponse stream creation.
-type JSApiStreamCreateResponse struct {
-	APIResponse
-	*StreamInfo
-}
-
-type JSApiStreamInfoResponse = JSApiStreamCreateResponse
+// type JSApiStreamCreateResponse struct {
+// 	APIResponse
+// 	*StreamInfo
+// }
+// 
+// type JSApiStreamInfoResponse = JSApiStreamCreateResponse
 
 // APIPaged includes variables used to create paged responses from the JSON API
 type APIPaged struct {

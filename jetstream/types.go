@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 )
 
 type DeliverPolicy int
@@ -129,44 +128,6 @@ func (p ReplayPolicy) MarshalJSON() ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown replay policy %v", p)
 	}
-}
-
-// StreamInfo shows config and current state for this stream.
-type StreamInfo struct {
-	Config  StreamConfig `json:"config"`
-	Created time.Time    `json:"created"`
-	State   StreamState  `json:"state"`
-}
-
-// StreamStats is information about the given stream.
-type StreamState struct {
-	Msgs      uint64    `json:"messages"`
-	Bytes     uint64    `json:"bytes"`
-	FirstSeq  uint64    `json:"first_seq"`
-	FirstTime time.Time `json:"first_ts"`
-	LastSeq   uint64    `json:"last_seq"`
-	LastTime  time.Time `json:"last_ts"`
-	Consumers int       `json:"consumer_count"`
-}
-
-// StreamConfig will determine the properties for a stream.
-// There are sensible defaults for most. If no subjects are
-// given the name will be used as the only subject.
-type StreamConfig struct {
-	Name         string          `json:"name"`
-	Subjects     []string        `json:"subjects,omitempty"`
-	Retention    RetentionPolicy `json:"retention"`
-	MaxConsumers int             `json:"max_consumers"`
-	MaxMsgs      int64           `json:"max_msgs"`
-	MaxBytes     int64           `json:"max_bytes"`
-	Discard      DiscardPolicy   `json:"discard"`
-	MaxAge       time.Duration   `json:"max_age"`
-	MaxMsgSize   int32           `json:"max_msg_size,omitempty"`
-	Storage      StorageType     `json:"storage"`
-	Replicas     int             `json:"num_replicas"`
-	NoAck        bool            `json:"no_ack,omitempty"`
-	Template     string          `json:"template_owner,omitempty"`
-	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
 }
 
 // RetentionPolicy determines how messages in a set are retained.

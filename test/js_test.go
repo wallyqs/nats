@@ -23,6 +23,7 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestJetStreamNotEnabled(t *testing.T) {
@@ -105,7 +106,7 @@ func TestJetStreamPublish(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	// Double check that file-based storage is default.
-	if si.Config.Storage != nats.FileStorage {
+	if si.Config.Storage != jetstream.FileStorage {
 		t.Fatalf("Expected FileStorage as default, got %v", si.Config.Storage)
 	}
 
@@ -332,7 +333,7 @@ func TestJetStreamSubscribe(t *testing.T) {
 	// If we are here we have received all of the messages.
 	// We hang the ConsumerInfo option off of the subscription, so we use that to check status.
 	info, _ := sub.ConsumerInfo()
-	if info.Config.AckPolicy != nats.AckExplicit {
+	if info.Config.AckPolicy != jetstream.AckExplicit {
 		t.Fatalf("Expected ack explicit policy, got %q", info.Config.AckPolicy)
 	}
 	if info.Delivered.Consumer != uint64(toSend) {
@@ -537,7 +538,7 @@ func TestJetStreamManagement(t *testing.T) {
 	}
 
 	// Create a consumer using our client API.
-	ci, err := js.AddConsumer("foo", &nats.ConsumerConfig{Durable: "dlc", AckPolicy: nats.AckExplicit})
+	ci, err := js.AddConsumer("foo", &nats.ConsumerConfig{Durable: "dlc", AckPolicy: jetstream.AckExplicit})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1005,19 +1006,19 @@ func TestJetStreamSubscribe_DeliverPolicy(t *testing.T) {
 		expected int
 	}{
 		{
-			"deliver.all", nats.DeliverAllAvailable(), 10,
+			"deliver.all", nats.DeliverAll(), 10,
 		},
 		{
-			"deliver.last", nats.DeliverLastReceived(), 1,
+			"deliver.last", nats.DeliverLast(), 1,
 		},
 		{
 			"deliver.new", nats.DeliverNew(), 0,
 		},
 		{
-			"deliver.starttime", nats.DeliverByStartTime(publishTime), 5,
+			"deliver.starttime", nats.StartTime(publishTime), 5,
 		},
 		{
-			"deliver.startseq", nats.DeliverByStartSequence(6), 5,
+			"deliver.startseq", nats.StartSequence(6), 5,
 		},
 	} {
 		test := test
