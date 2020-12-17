@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // JetStream is the public interface for JetStream.
@@ -54,39 +56,6 @@ type JetStreamManager interface {
 type JetStreamContext interface {
 	JetStream
 	JetStreamManager
-}
-
-// APIError is included in all API responses if there was an error.
-type APIError struct {
-	Code        int    `json:"code"`
-	Description string `json:"description,omitempty"`
-}
-
-// APIResponse is a standard response from the JetStream JSON API
-type APIResponse struct {
-	Type  string    `json:"type"`
-	Error *APIError `json:"error,omitempty"`
-}
-
-type AccountInfoResponse struct {
-	APIResponse
-	*AccountStats
-}
-
-// AccountLimits is for the information about
-type AccountLimits struct {
-	MaxMemory    int64 `json:"max_memory"`
-	MaxStore     int64 `json:"max_storage"`
-	MaxStreams   int   `json:"max_streams"`
-	MaxConsumers int   `json:"max_consumers"`
-}
-
-// AccountStats returns current statistics about the account's JetStream usage.
-type AccountStats struct {
-	Memory  uint64        `json:"memory"`
-	Store   uint64        `json:"storage"`
-	Streams int           `json:"streams"`
-	Limits  AccountLimits `json:"limits"`
 }
 
 // Internal struct for jetstream
@@ -144,7 +113,7 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStreamContext, error) {
 		}
 		return nil, err
 	}
-	var info AccountInfoResponse
+	var info jetstream.AccountInfoResponse
 	if err := json.Unmarshal(resp.Data, &info); err != nil {
 		return nil, err
 	}
@@ -214,17 +183,6 @@ type pubOpts struct {
 	seq uint64 // Expected last sequence
 }
 
-type PubAckResponse struct {
-	APIResponse
-	*PubAck
-}
-
-type PubAck struct {
-	Stream    string `json:"stream"`
-	Sequence  uint64 `json:"seq"`
-	Duplicate bool   `json:"duplicate,omitempty"`
-}
-
 // Headers for published messages.
 const (
 	MsgIdHdr             = "Nats-Msg-Id"
@@ -281,7 +239,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		}
 		return nil, err
 	}
-	var pa PubAckResponse
+	var pa jetstream.PubAckResponse
 	if err := json.Unmarshal(resp.Data, &pa); err != nil {
 		return nil, ErrInvalidJSAck
 	}
@@ -291,7 +249,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 	if pa.PubAck == nil || pa.PubAck.Stream == _EMPTY_ {
 		return nil, ErrInvalidJSAck
 	}
-	return pa.PubAck, nil
+	return &PubAck{*pa.PubAck}, nil
 }
 
 func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error) {
@@ -369,25 +327,37 @@ type JSApiCreateConsumerRequest struct {
 }
 
 type ConsumerConfig struct {
-	Durable         string        `json:"durable_name,omitempty"`
-	DeliverSubject  string        `json:"deliver_subject,omitempty"`
-	DeliverPolicy   DeliverPolicy `json:"deliver_policy"`
-	OptStartSeq     uint64        `json:"opt_start_seq,omitempty"`
-	OptStartTime    *time.Time    `json:"opt_start_time,omitempty"`
-	AckPolicy       AckPolicy     `json:"ack_policy"`
-	AckWait         time.Duration `json:"ack_wait,omitempty"`
-	MaxDeliver      int           `json:"max_deliver,omitempty"`
-	FilterSubject   string        `json:"filter_subject,omitempty"`
-	ReplayPolicy    ReplayPolicy  `json:"replay_policy"`
-	RateLimit       uint64        `json:"rate_limit_bps,omitempty"` // Bits per sec
-	SampleFrequency string        `json:"sample_freq,omitempty"`
-	MaxWaiting      int           `json:"max_waiting,omitempty"`
-	MaxAckPending   int           `json:"max_ack_pending,omitempty"`
+	Durable         string                  `json:"durable_name,omitempty"`
+	DeliverSubject  string                  `json:"deliver_subject,omitempty"`
+	DeliverPolicy   jetstream.DeliverPolicy `json:"deliver_policy"`
+	OptStartSeq     uint64                  `json:"opt_start_seq,omitempty"`
+	OptStartTime    *time.Time              `json:"opt_start_time,omitempty"`
+	AckPolicy       jetstream.AckPolicy     `json:"ack_policy"`
+	AckWait         time.Duration           `json:"ack_wait,omitempty"`
+	MaxDeliver      int                     `json:"max_deliver,omitempty"`
+	FilterSubject   string                  `json:"filter_subject,omitempty"`
+	ReplayPolicy    jetstream.ReplayPolicy  `json:"replay_policy"`
+	RateLimit       uint64                  `json:"rate_limit_bps,omitempty"` // Bits per sec
+	SampleFrequency string                  `json:"sample_freq,omitempty"`
+	MaxWaiting      int                     `json:"max_waiting,omitempty"`
+	MaxAckPending   int                     `json:"max_ack_pending,omitempty"`
 }
 
 type JSApiConsumerResponse struct {
-	APIResponse
+	jetstream.APIResponse
 	*ConsumerInfo
+}
+
+type PubAck struct {
+	jetstream.PubAck
+}
+
+type StreamConfig struct {
+	jetstream.StreamConfig
+}
+
+type StreamInfo struct {
+	jetstream.StreamInfo
 }
 
 type ConsumerInfo struct {
@@ -406,13 +376,6 @@ type ConsumerInfo struct {
 type SequencePair struct {
 	Consumer uint64 `json:"consumer_seq"`
 	Stream   uint64 `json:"stream_seq"`
-}
-
-// NextRequest is for getting next messages for pull based consumers.
-type NextRequest struct {
-	Expires *time.Time `json:"expires,omitempty"`
-	Batch   int        `json:"batch,omitempty"`
-	NoWait  bool       `json:"no_wait,omitempty"`
 }
 
 // SubOpt configures options for subscribing to JetStream consumers.
@@ -448,22 +411,11 @@ func (js *js) ChanSubscribe(subj string, ch chan *Msg, opts ...SubOpt) (*Subscri
 	return js.subscribe(subj, _EMPTY_, nil, ch, opts)
 }
 
-// APIPaged includes variables used to create paged responses from the JSON API
-type APIPaged struct {
-	Total  int `json:"total"`
-	Offset int `json:"offset"`
-	Limit  int `json:"limit"`
-}
-
 type streamRequest struct {
 	Subject string `json:"subject,omitempty"`
 }
 
-type JSApiStreamNamesResponse struct {
-	APIResponse
-	APIPaged
-	Streams []string `json:"streams"`
-}
+const ackPolicyNotSet = jetstream.AckPolicy(99)
 
 func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []SubOpt) (*Subscription, error) {
 	cfg := ConsumerConfig{AckPolicy: ackPolicyNotSet}
@@ -545,12 +497,12 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	if shouldCreate {
 		// If not set default to ack explicit.
 		if cfg.AckPolicy == ackPolicyNotSet {
-			cfg.AckPolicy = AckExplicit
+			cfg.AckPolicy = jetstream.AckExplicit
 		}
 		// If we have acks at all and the MaxAckPending is not set go ahead
 		// and set to the internal max.
 		// TODO(dlc) - We should be able to update this if client updates PendingLimits.
-		if cfg.MaxAckPending == 0 && cfg.AckPolicy != AckNone {
+		if cfg.MaxAckPending == 0 && cfg.AckPolicy != jetstream.AckNone {
 			maxMsgs, _, _ := sub.PendingLimits()
 			cfg.MaxAckPending = maxMsgs
 		}
@@ -616,7 +568,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 }
 
 func (js *js) lookupStreamBySubject(subj string) (string, error) {
-	var slr JSApiStreamNamesResponse
+	var slr jetstream.JSApiStreamNamesResponse
 	// FIXME(dlc) - prefix
 	req := &streamRequest{subj}
 	j, err := json.Marshal(req)
@@ -701,20 +653,20 @@ func ManualAck() SubOpt {
 	})
 }
 
-// DeliverAllAvailable will configure a Consumer to receive all the
+// DeliverAll will configure a Consumer to receive all the
 // messages from a Stream.
-func DeliverAllAvailable() SubOpt {
+func DeliverAll() SubOpt {
 	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.DeliverPolicy = DeliverAllPolicy
+		opts.cfg.DeliverPolicy = jetstream.DeliverAll
 		return nil
 	})
 }
 
 // DeliverLastReceived configures a Consumer to receive messages
 // starting with the latest one.
-func DeliverLastReceived() SubOpt {
+func DeliverLast() SubOpt {
 	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.DeliverPolicy = DeliverLastPolicy
+		opts.cfg.DeliverPolicy = jetstream.DeliverLast
 		return nil
 	})
 }
@@ -723,26 +675,25 @@ func DeliverLastReceived() SubOpt {
 // published after the subscription.
 func DeliverNew() SubOpt {
 	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.DeliverPolicy = DeliverNewPolicy
+		opts.cfg.DeliverPolicy = jetstream.DeliverNew
 		return nil
 	})
 }
 
-// DeliverByStartSequence configures a Consumer to receive
+// StartSequence configures a Consumer to receive
 // messages from a start sequence.
-func DeliverByStartSequence(seq uint64) SubOpt {
+func StartSequence(seq uint64) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.DeliverPolicy = DeliverByStartSequencePolicy
+		opts.cfg.DeliverPolicy = jetstream.StartSequence
 		opts.cfg.OptStartSeq = seq
 		return nil
 	})
 }
 
-// DeliverByStartTime configures a Consumer to receive
-// messages from a start time.
-func DeliverByStartTime(startTime time.Time) SubOpt {
+// StartTime configures a Consumer to receive messages from a start time.
+func StartTime(startTime time.Time) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.DeliverPolicy = DeliverByStartTimePolicy
+		opts.cfg.DeliverPolicy = jetstream.StartTime
 		opts.cfg.OptStartTime = &startTime
 		return nil
 	})
@@ -775,7 +726,7 @@ func (sub *Subscription) Poll() error {
 	js := sub.jsi.js
 	sub.mu.Unlock()
 
-	req, _ := json.Marshal(&NextRequest{Batch: batch})
+	req, _ := json.Marshal(&jetstream.NextRequest{Batch: batch})
 	reqNext := js.apiSubj(fmt.Sprintf(JSApiRequestNextT, stream, consumer))
 	return nc.PublishRequest(reqNext, reply, req)
 }
@@ -934,97 +885,6 @@ func parseNum(d string) (n int64) {
 	return n
 }
 
-// Additional jetstream structures.
-
-type AckPolicy int
-
-const (
-	AckNone AckPolicy = iota
-	AckAll
-	AckExplicit
-
-	// For setting
-	ackPolicyNotSet = 99
-)
-
-func jsonString(s string) string {
-	return "\"" + s + "\""
-}
-
-func (p *AckPolicy) UnmarshalJSON(data []byte) error {
-	switch string(data) {
-	case jsonString("none"):
-		*p = AckNone
-	case jsonString("all"):
-		*p = AckAll
-	case jsonString("explicit"):
-		*p = AckExplicit
-	default:
-		return fmt.Errorf("can not unmarshal %q", data)
-	}
-
-	return nil
-}
-
-func (p AckPolicy) MarshalJSON() ([]byte, error) {
-	switch p {
-	case AckNone:
-		return json.Marshal("none")
-	case AckAll:
-		return json.Marshal("all")
-	case AckExplicit:
-		return json.Marshal("explicit")
-	default:
-		return nil, fmt.Errorf("unknown acknowlegement policy %v", p)
-	}
-}
-
-func (p AckPolicy) String() string {
-	switch p {
-	case AckNone:
-		return "AckNone"
-	case AckAll:
-		return "AckAll"
-	case AckExplicit:
-		return "AckExplicit"
-	case ackPolicyNotSet:
-		return "Not Initialized"
-	default:
-		return "Unknown AckPolicy"
-	}
-}
-
-type ReplayPolicy int
-
-const (
-	ReplayInstant ReplayPolicy = iota
-	ReplayOriginal
-)
-
-func (p *ReplayPolicy) UnmarshalJSON(data []byte) error {
-	switch string(data) {
-	case jsonString("instant"):
-		*p = ReplayInstant
-	case jsonString("original"):
-		*p = ReplayOriginal
-	default:
-		return fmt.Errorf("can not unmarshal %q", data)
-	}
-
-	return nil
-}
-
-func (p ReplayPolicy) MarshalJSON() ([]byte, error) {
-	switch p {
-	case ReplayOriginal:
-		return json.Marshal("original")
-	case ReplayInstant:
-		return json.Marshal("instant")
-	default:
-		return nil, fmt.Errorf("unknown replay policy %v", p)
-	}
-}
-
 var (
 	AckAck      = []byte("+ACK")
 	AckNak      = []byte("-NAK")
@@ -1032,62 +892,6 @@ var (
 	AckNext     = []byte("+NXT")
 	AckTerm     = []byte("+TERM")
 )
-
-// DeliverPolicy determines how the consumer should select the first message to deliver.
-type DeliverPolicy int
-
-const (
-	// DeliverAllPolicy will be the default so can be omitted from the request.
-	DeliverAllPolicy DeliverPolicy = iota
-
-	// DeliverLastPolicy will start the consumer with the last sequence received.
-	DeliverLastPolicy
-
-	// DeliverNewPolicy will only deliver new messages that are sent
-	// after the consumer is created.
-	DeliverNewPolicy
-
-	// DeliverByStartSequencePolicy will look for a defined starting sequence to start.
-	DeliverByStartSequencePolicy
-
-	// DeliverByStartTimePolicy will select the first messsage with a
-	// timestamp >= to StartTime.
-	DeliverByStartTimePolicy
-)
-
-func (p *DeliverPolicy) UnmarshalJSON(data []byte) error {
-	switch string(data) {
-	case jsonString("all"), jsonString("undefined"):
-		*p = DeliverAllPolicy
-	case jsonString("last"):
-		*p = DeliverLastPolicy
-	case jsonString("new"):
-		*p = DeliverNewPolicy
-	case jsonString("by_start_sequence"):
-		*p = DeliverByStartSequencePolicy
-	case jsonString("by_start_time"):
-		*p = DeliverByStartTimePolicy
-	}
-
-	return nil
-}
-
-func (p DeliverPolicy) MarshalJSON() ([]byte, error) {
-	switch p {
-	case DeliverAllPolicy:
-		return json.Marshal("all")
-	case DeliverLastPolicy:
-		return json.Marshal("last")
-	case DeliverNewPolicy:
-		return json.Marshal("new")
-	case DeliverByStartSequencePolicy:
-		return json.Marshal("by_start_sequence")
-	case DeliverByStartTimePolicy:
-		return json.Marshal("by_start_time")
-	default:
-		return nil, fmt.Errorf("unknown deliver policy %v", p)
-	}
-}
 
 // Management for JetStream
 // TODO(dlc) - Fill this out.
@@ -1127,32 +931,6 @@ func (js *js) AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, er
 	return info.ConsumerInfo, nil
 }
 
-// StreamConfig will determine the properties for a stream.
-// There are sensible defaults for most. If no subjects are
-// given the name will be used as the only subject.
-type StreamConfig struct {
-	Name         string          `json:"name"`
-	Subjects     []string        `json:"subjects,omitempty"`
-	Retention    RetentionPolicy `json:"retention"`
-	MaxConsumers int             `json:"max_consumers"`
-	MaxMsgs      int64           `json:"max_msgs"`
-	MaxBytes     int64           `json:"max_bytes"`
-	Discard      DiscardPolicy   `json:"discard"`
-	MaxAge       time.Duration   `json:"max_age"`
-	MaxMsgSize   int32           `json:"max_msg_size,omitempty"`
-	Storage      StorageType     `json:"storage"`
-	Replicas     int             `json:"num_replicas"`
-	NoAck        bool            `json:"no_ack,omitempty"`
-	Template     string          `json:"template_owner,omitempty"`
-	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
-}
-
-// JSApiStreamCreateResponse stream creation.
-type JSApiStreamCreateResponse struct {
-	APIResponse
-	*StreamInfo
-}
-
 func (js *js) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
 	if cfg == nil || cfg.Name == _EMPTY_ {
 		return nil, ErrStreamNameRequired
@@ -1168,17 +946,15 @@ func (js *js) AddStream(cfg *StreamConfig) (*StreamInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp JSApiStreamCreateResponse
+	var resp jetstream.JSApiStreamCreateResponse
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Error != nil {
 		return nil, errors.New(resp.Error.Description)
 	}
-	return resp.StreamInfo, nil
+	return &StreamInfo{*resp.StreamInfo}, nil
 }
-
-type JSApiStreamInfoResponse = JSApiStreamCreateResponse
 
 func (js *js) StreamInfo(stream string) (*StreamInfo, error) {
 	csSubj := js.apiSubj(fmt.Sprintf(JSApiStreamInfoT, stream))
@@ -1186,183 +962,12 @@ func (js *js) StreamInfo(stream string) (*StreamInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp JSApiStreamInfoResponse
+	var resp jetstream.JSApiStreamInfoResponse
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Error != nil {
 		return nil, errors.New(resp.Error.Description)
 	}
-	return resp.StreamInfo, nil
-}
-
-// StreamInfo shows config and current state for this stream.
-type StreamInfo struct {
-	Config  StreamConfig `json:"config"`
-	Created time.Time    `json:"created"`
-	State   StreamState  `json:"state"`
-}
-
-// StreamStats is information about the given stream.
-type StreamState struct {
-	Msgs      uint64    `json:"messages"`
-	Bytes     uint64    `json:"bytes"`
-	FirstSeq  uint64    `json:"first_seq"`
-	FirstTime time.Time `json:"first_ts"`
-	LastSeq   uint64    `json:"last_seq"`
-	LastTime  time.Time `json:"last_ts"`
-	Consumers int       `json:"consumer_count"`
-}
-
-// RetentionPolicy determines how messages in a set are retained.
-type RetentionPolicy int
-
-const (
-	// LimitsPolicy (default) means that messages are retained until any given limit is reached.
-	// This could be one of MaxMsgs, MaxBytes, or MaxAge.
-	LimitsPolicy RetentionPolicy = iota
-	// InterestPolicy specifies that when all known observables have acknowledged a message it can be removed.
-	InterestPolicy
-	// WorkQueuePolicy specifies that when the first worker or subscriber acknowledges the message it can be removed.
-	WorkQueuePolicy
-)
-
-// Discard Policy determines how we proceed when limits of messages or bytes are hit. The default, DicscardOld will
-// remove older messages. DiscardNew will fail to store the new message.
-type DiscardPolicy int
-
-const (
-	// DiscardOld will remove older messages to return to the limits.
-	DiscardOld = iota
-	//DiscardNew will error on a StoreMsg call
-	DiscardNew
-)
-
-const (
-	limitsPolicyString    = "limits"
-	interestPolicyString  = "interest"
-	workQueuePolicyString = "workqueue"
-)
-
-func (rp RetentionPolicy) String() string {
-	switch rp {
-	case LimitsPolicy:
-		return "Limits"
-	case InterestPolicy:
-		return "Interest"
-	case WorkQueuePolicy:
-		return "WorkQueue"
-	default:
-		return "Unknown Retention Policy"
-	}
-}
-
-func (rp RetentionPolicy) MarshalJSON() ([]byte, error) {
-	switch rp {
-	case LimitsPolicy:
-		return json.Marshal(limitsPolicyString)
-	case InterestPolicy:
-		return json.Marshal(interestPolicyString)
-	case WorkQueuePolicy:
-		return json.Marshal(workQueuePolicyString)
-	default:
-		return nil, fmt.Errorf("can not marshal %v", rp)
-	}
-}
-
-func (rp *RetentionPolicy) UnmarshalJSON(data []byte) error {
-	switch string(data) {
-	case jsonString(limitsPolicyString):
-		*rp = LimitsPolicy
-	case jsonString(interestPolicyString):
-		*rp = InterestPolicy
-	case jsonString(workQueuePolicyString):
-		*rp = WorkQueuePolicy
-	default:
-		return fmt.Errorf("can not unmarshal %q", data)
-	}
-	return nil
-}
-
-func (dp DiscardPolicy) String() string {
-	switch dp {
-	case DiscardOld:
-		return "DiscardOld"
-	case DiscardNew:
-		return "DiscardNew"
-	default:
-		return "Unknown Discard Policy"
-	}
-}
-
-func (dp DiscardPolicy) MarshalJSON() ([]byte, error) {
-	switch dp {
-	case DiscardOld:
-		return json.Marshal("old")
-	case DiscardNew:
-		return json.Marshal("new")
-	default:
-		return nil, fmt.Errorf("can not marshal %v", dp)
-	}
-}
-
-func (dp *DiscardPolicy) UnmarshalJSON(data []byte) error {
-	switch strings.ToLower(string(data)) {
-	case jsonString("old"):
-		*dp = DiscardOld
-	case jsonString("new"):
-		*dp = DiscardNew
-	default:
-		return fmt.Errorf("can not unmarshal %q", data)
-	}
-	return nil
-}
-
-// StorageType determines how messages are stored for retention.
-type StorageType int
-
-const (
-	// FileStorage specifies on disk storage. It's the default.
-	FileStorage StorageType = iota
-	// MemoryStorage specifies in memory only.
-	MemoryStorage
-)
-
-const (
-	memoryStorageString = "memory"
-	fileStorageString   = "file"
-)
-
-func (st StorageType) String() string {
-	switch st {
-	case MemoryStorage:
-		return strings.Title(memoryStorageString)
-	case FileStorage:
-		return strings.Title(fileStorageString)
-	default:
-		return "Unknown Storage Type"
-	}
-}
-
-func (st StorageType) MarshalJSON() ([]byte, error) {
-	switch st {
-	case MemoryStorage:
-		return json.Marshal(memoryStorageString)
-	case FileStorage:
-		return json.Marshal(fileStorageString)
-	default:
-		return nil, fmt.Errorf("can not marshal %v", st)
-	}
-}
-
-func (st *StorageType) UnmarshalJSON(data []byte) error {
-	switch string(data) {
-	case jsonString(memoryStorageString):
-		*st = MemoryStorage
-	case jsonString(fileStorageString):
-		*st = FileStorage
-	default:
-		return fmt.Errorf("can not unmarshal %q", data)
-	}
-	return nil
+	return &StreamInfo{*resp.StreamInfo}, nil
 }
