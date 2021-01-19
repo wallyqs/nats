@@ -9,3 +9,5 @@ require (
 	github.com/nats-io/nuid v1.0.1
 	google.golang.org/protobuf v1.23.0
 )
+
+replace github.com/nats-io/nats-server/v2 => ../nats-server

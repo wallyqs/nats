@@ -83,13 +83,13 @@ type apiError struct {
 	Description string `json:"description,omitempty"`
 }
 
-// apiResponse is a standard response from the JetStream JSON API
+// apiResponse is a standard response from the JetStream JSON API.
 type apiResponse struct {
 	Type  string    `json:"type"`
 	Error *apiError `json:"error,omitempty"`
 }
 
-// apiPaged includes variables used to create paged responses from the JSON API
+// apiPaged includes variables used to create paged responses from the JSON API.
 type apiPaged struct {
 	Total  int `json:"total"`
 	Offset int `json:"offset"`
@@ -100,6 +100,7 @@ type apiPaged struct {
 // from APIs responding with apiPaged.
 type apiPagedRequest struct {
 	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
 }
 
 // accountStats returns current statistics about the account's JetStream usage.
@@ -460,6 +461,21 @@ func (js *js) PurgeStream(name string) error {
 	return nil
 }
 
+// streamNamesRequest is used for Stream Name requests.
+type streamNamesRequest struct {
+	apiPagedRequest
+	// These are filters that can be applied to the list.
+	Subject string `json:"subject,omitempty"`
+}
+
+// streamListResponse list of detailed stream information.
+// A nil request is valid and means all streams.
+type streamListResponse struct {
+	apiResponse
+	apiPaged
+	Streams []*StreamInfo `json:"streams"`
+}
+
 // StreamLister fetches pages of StreamInfo objects. This object is not safe
 // to use for multiple threads.
 type StreamLister struct {
@@ -471,21 +487,6 @@ type StreamLister struct {
 	pageInfo *apiPaged
 }
 
-// streamListResponse list of detailed stream information.
-// A nil request is valid and means all streams.
-type streamListResponse struct {
-	apiResponse
-	apiPaged
-	Streams []*StreamInfo `json:"streams"`
-}
-
-// streamNamesRequest is used for Stream Name requests.
-type streamNamesRequest struct {
-	apiPagedRequest
-	// These are filters that can be applied to the list.
-	Subject string `json:"subject,omitempty"`
-}
-
 // Next fetches the next StreamInfo page.
 func (s *StreamLister) Next() bool {
 	if s.err != nil {
@@ -494,7 +495,6 @@ func (s *StreamLister) Next() bool {
 	if s.pageInfo != nil && s.offset >= s.pageInfo.Total {
 		return false
 	}
-
 	req, err := json.Marshal(streamNamesRequest{
 		apiPagedRequest: apiPagedRequest{Offset: s.offset},
 	})
@@ -522,7 +522,13 @@ func (s *StreamLister) Next() bool {
 	s.pageInfo = &resp.apiPaged
 	s.page = resp.Streams
 	s.offset += len(s.page)
+	fmt.Println(s.pageInfo.Total, s.page)
 	return true
+}
+
+// NextMsg 
+func (s *StreamLister) NextMsg() bool {
+	return false
 }
 
 // Page returns the current StreamInfo page.
