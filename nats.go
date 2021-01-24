@@ -542,6 +542,7 @@ type jsSub struct {
 	stream   string
 	deliver  string
 	pull     int
+	attached bool
 }
 
 // Msg is a structure used by Subscribers and PublishMsg().
@@ -3515,6 +3516,7 @@ func (s *Subscription) Unsubscribe() error {
 	s.mu.Lock()
 	conn := s.conn
 	closed := s.closed
+	jsi := s.jsi
 	s.mu.Unlock()
 	if conn == nil || conn.IsClosed() {
 		return ErrConnectionClosed
@@ -3525,6 +3527,22 @@ func (s *Subscription) Unsubscribe() error {
 	if conn.IsDraining() {
 		return ErrConnectionDraining
 	}
+
+	if jsi != nil && !jsi.attached {
+		// In case it is a JetStream subscription need to delete
+		// consumer in the server unless it is attached/direct only.
+		js := jsi.js
+		if !js.direct {
+			err := js.DeleteConsumer(jsi.stream, jsi.consumer)
+			if err != nil {
+				nc := js.nc
+				nc.mu.Lock()
+				nc.ach.push(func() { nc.Opts.AsyncErrorCB(nc, s, err) })
+				nc.mu.Unlock()
+			}
+		}
+	}
+
 	return conn.unsubscribe(s, 0, false)
 }
 
