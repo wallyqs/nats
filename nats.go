@@ -535,15 +535,6 @@ type Subscription struct {
 	dropped     int
 }
 
-// For JetStream subscription info.
-type jsSub struct {
-	js       *js
-	consumer string
-	stream   string
-	deliver  string
-	pull     int
-}
-
 // Msg is a structure used by Subscribers and PublishMsg().
 type Msg struct {
 	Subject string
@@ -3446,6 +3437,7 @@ func (nc *Conn) removeSub(s *Subscription) {
 	nc.subsMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	// Release callers on NextMsg for SyncSubscription only
 	if s.mch != nil && s.typ == SyncSubscription {
 		close(s.mch)
@@ -3525,6 +3517,7 @@ func (s *Subscription) Unsubscribe() error {
 	if conn.IsDraining() {
 		return ErrConnectionDraining
 	}
+
 	return conn.unsubscribe(s, 0, false)
 }
 
@@ -3586,6 +3579,18 @@ func (s *Subscription) AutoUnsubscribe(max int) error {
 // unsubscribe performs the low level unsubscribe to the server.
 // Use Subscription.Unsubscribe()
 func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
+	// Check whether it is a JetStream subscription and have to
+	// clean up consumers.
+	sub.mu.Lock()
+	jsi := sub.jsi
+	sub.mu.Unlock()
+	if jsi != nil {
+		err := jsi.unsubscribe()
+		if err != nil {
+			return err
+		}
+	}
+
 	nc.mu.Lock()
 	// ok here, but defer is expensive
 	defer nc.mu.Unlock()
