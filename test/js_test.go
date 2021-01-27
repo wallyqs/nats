@@ -770,6 +770,24 @@ func TestJetStreamManagement(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 
+	sl = js.NewStreamLister()
+	var i int
+	expected := "foo"
+	for stream := range sl.Streams() {
+		i++
+
+		got := stream.Config.Name
+		if got != expected {
+			t.Fatalf("Expected stream to be %v, got: %v", expected, got)
+		}
+	}
+	if err := sl.Err(); err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if i != 1 {
+		t.Errorf("Expected single stream: %v", err)
+	}
+
 	if cl := js.NewConsumerLister(""); cl.Next() {
 		t.Fatalf("Unexpected next ok")
 	} else if err := cl.Err(); err == nil {
