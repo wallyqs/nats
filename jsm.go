@@ -39,8 +39,8 @@ type JetStreamManager interface {
 	// Purge stream messages.
 	PurgeStream(name string) error
 
-	// NewStreamLister is used to return pages of StreamInfo objects.
-	NewStreamLister() *StreamLister
+	// StreamsInfo can be used to retrieve a list of StreamInfo objects.
+	StreamsInfo() <-chan *StreamInfo
 
 	// GetMsg retrieves a raw stream message stored in JetStream by sequence number.
 	GetMsg(name string, seq uint64) (*RawStreamMsg, error)
@@ -600,15 +600,48 @@ func (js *js) PurgeStream(name string) error {
 	return nil
 }
 
-// StreamLister fetches pages of StreamInfo objects. This object is not safe
+// StreamLister fetches StreamInfo objects. This object is not safe
 // to use for multiple threads.
-type StreamLister struct {
+type StreamLister interface {
+	// Next fetches the next page of streams.
+	Next() bool
+
+	// Page() is a collection of streams.
+	Page() []*StreamInfo
+
+	// Err() is the sticky error like Scanner.
+	Err() error
+
+	// Streams is a receive only channel to iterate over streams.
+	Streams() <-chan *StreamInfo
+}
+
+// streamLister fetches pages of StreamInfo objects. This object is not safe
+// to use for multiple threads.
+type streamLister struct {
 	js   *js
 	page []*StreamInfo
 	err  error
 
 	offset   int
 	pageInfo *apiPaged
+}
+
+// Streams returns a receive only channel to iterate on the streams.
+func (js *js) StreamsInfo() <-chan *StreamInfo {
+	ach := make(chan *StreamInfo)
+	sl := &streamLister{js: js}
+	go func() {
+		for sl.Next() {
+			for _, info := range sl.Page() {
+				ach <- info
+			}
+		}
+
+		close(ach)
+	}()
+
+	return ach
 }
 
 // streamListResponse list of detailed stream information.
@@ -627,7 +660,7 @@ type streamNamesRequest struct {
 }
 
 // Next fetches the next StreamInfo page.
-func (s *StreamLister) Next() bool {
+func (s *streamLister) Next() bool {
 	if s.err != nil {
 		return false
 	}
@@ -666,16 +699,11 @@ func (s *StreamLister) Next() bool {
 }
 
 // Page returns the current StreamInfo page.
-func (s *StreamLister) Page() []*StreamInfo {
+func (s *streamLister) Page() []*StreamInfo {
 	return s.page
 }
 
 // Err returns any errors found while fetching pages.
-func (s *StreamLister) Err() error {
+func (s *streamLister) Err() error {
 	return s.err
-}
-
-// NewStreamLister is used to return pages of StreamInfo objects.
-func (js *js) NewStreamLister() *StreamLister {
-	return &StreamLister{js: js}
 }

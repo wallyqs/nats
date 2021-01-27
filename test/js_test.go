@@ -756,18 +756,18 @@ func TestJetStreamManagement(t *testing.T) {
 		t.Fatalf("ConsumerInfo is not correct %+v", si)
 	}
 
-	sl := js.NewStreamLister()
-	if !sl.Next() {
-		if err := sl.Err(); err != nil {
-			t.Errorf("Unexpected error: %v", err)
+	var i int
+	expected := "foo"
+	for stream := range js.StreamsInfo() {
+		i++
+
+		got := stream.Config.Name
+		if got != expected {
+			t.Fatalf("Expected stream to be %v, got: %v", expected, got)
 		}
-		t.Fatalf("Unexpected stream lister next")
 	}
-	if p := sl.Page(); len(p) != 1 || p[0].Config.Name != "foo" {
-		t.Fatalf("StreamInfo is not correct %+v", p)
-	}
-	if err := sl.Err(); err != nil {
-		t.Errorf("Unexpected error: %v", err)
+	if i != 1 {
+		t.Errorf("Expected single stream: %v", err)
 	}
 
 	if cl := js.NewConsumerLister(""); cl.Next() {
