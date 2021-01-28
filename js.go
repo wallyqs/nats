@@ -399,6 +399,33 @@ type NextRequest struct {
 	NoWait  bool       `json:"no_wait,omitempty"`
 }
 
+// jsSub includes JetStream subscription info.
+type jsSub struct {
+	js       *js
+	consumer string
+	stream   string
+	deliver  string
+	pull     int
+	durable  bool
+	attached bool
+}
+
+func (jsi *jsSub) unsubscribe(drainMode bool) error {
+	if drainMode && (jsi.durable || jsi.attached) {
+		// Skip deleting consumer for durables/attached
+		// consumers when using drain mode.
+		return nil
+	}
+
+	// Skip if in direct mode as well.
+	js := jsi.js
+	if js.direct {
+		return nil
+	}
+
+	return js.DeleteConsumer(jsi.stream, jsi.consumer)
+}
+
 // SubOpt configures options for subscribing to JetStream consumers.
 type SubOpt interface {
 	configureSubscribe(opts *subOpts) error
@@ -533,7 +560,8 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		}
 
 		var ccSubj string
-		if cfg.Durable != _EMPTY_ {
+		isDurable := cfg.Durable != _EMPTY_
+		if isDurable {
 			ccSubj = fmt.Sprintf(apiDurableCreateT, stream, cfg.Durable)
 		} else {
 			ccSubj = fmt.Sprintf(apiConsumerCreateT, stream)
@@ -563,6 +591,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		sub.jsi.stream = info.Stream
 		sub.jsi.consumer = info.Name
 		sub.jsi.deliver = info.Config.DeliverSubject
+		sub.jsi.durable = isDurable
 	} else {
 		sub.jsi.stream = o.stream
 		sub.jsi.consumer = o.consumer
@@ -572,6 +601,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 			sub.jsi.deliver = ccfg.DeliverSubject
 		}
 	}
+	sub.jsi.attached = shouldAttach
 
 	// If we are pull based go ahead and fire off the first request to populate.
 	if isPullMode {
@@ -757,7 +787,13 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 		return nil, ErrTypeSubscription
 	}
 
+	// Consumer info lookup should fail if in direct mode.
 	js := sub.jsi.js
+	if js.direct {
+		sub.mu.Unlock()
+		return nil, ErrDirectModeRequired
+	}
+
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	sub.mu.Unlock()
 
