@@ -204,6 +204,7 @@ func (js *js) DeleteConsumer(stream, durable string) error {
 	}
 
 	dcSubj := js.apiSubj(fmt.Sprintf(apiConsumerDeleteT, stream, durable))
+	fmt.Println("--- DELETING ::: ", dcSubj, "|||||", stream, durable)
 	r, err := js.nc.Request(dcSubj, nil, js.wait)
 	if err != nil {
 		return err
