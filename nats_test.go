@@ -230,6 +230,13 @@ func RunServerOnPort(port int) *server.Server {
 	return RunServerWithOptions(&opts)
 }
 
+func RunBasicJetStreamServer() *server.Server {
+	opts := natsserver.DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	return RunServerWithOptions(&opts)
+}
+
 func RunServerWithOptions(opts *server.Options) *server.Server {
 	return natsserver.RunServer(opts)
 }
@@ -2597,5 +2604,44 @@ func TestMsg_RespondMsg(t *testing.T) {
 
 	if !bytes.Equal(resp.Data, []byte("response")) {
 		t.Fatalf("did not get correct response: %q", resp.Data)
+	}
+}
+
+func TestJetStream_Options(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer s.Shutdown()
+
+	jsMaxWait := 3*time.Second
+	nc, err := Connect(s.ClientURL(), JetStreamTimeout(jsMaxWait))
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	// Use default JetStreamTimeout option.
+	jsCtx, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	internal := jsCtx.(*js)
+
+	got := internal.wait
+	expected := jsMaxWait
+	if got != expected {
+		t.Fatalf("Expected %v, got %v", got, expected)
+	}
+
+	// Override local context JS API timeout.
+	jsCtxMaxWait := 5*time.Second
+	jsCtx, err = nc.JetStream(MaxWait(jsCtxMaxWait))
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	internal = jsCtx.(*js)
+
+	got = internal.wait
+	expected = jsCtxMaxWait
+	if got != expected {
+		t.Fatalf("Expected %v, got %v", got, expected)
 	}
 }

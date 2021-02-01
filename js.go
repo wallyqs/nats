@@ -117,7 +117,9 @@ type js struct {
 
 // JetStream returns a JetStream context for pub/sub interactions.
 func (nc *Conn) JetStream(opts ...JSOpt) (JetStreamContext, error) {
-	const defaultRequestWait = 5 * time.Second
+	nc.mu.Lock()
+	defaultRequestWait := nc.Opts.JetStreamTimeout
+	nc.mu.Unlock()
 
 	js := &js{nc: nc, pre: defaultAPIPrefix, wait: defaultRequestWait}
 
