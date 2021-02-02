@@ -1677,6 +1677,10 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	s1 := natsserver.RunServer(&o1)
 	defer s1.Shutdown()
 
+	if config := s1.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
 	o2 := natsserver.DefaultTestOptions
 	o2.Host = "127.0.0.1"
 	o2.Port = 9423
@@ -1688,6 +1692,10 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	o2.Routes = routes
 	s2 := natsserver.RunServer(&o2)
 	defer s2.Shutdown()
+
+	if config := s2.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
 
 	o3 := natsserver.DefaultTestOptions
 	o3.Host = "127.0.0.1"
@@ -1701,10 +1709,16 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	s3 := natsserver.RunServer(&o3)
 	defer s3.Shutdown()
 
-	// s := RunBasicJetStreamServer()
-	// defer s.Shutdown()
+	if config := s3.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
 
-	// if config := s.JetStreamConfig(); config != nil {
+	// SINGLE MODE TESTING
+	// -------------------
+	// s1 := RunBasicJetStreamServer()
+	// defer s1.Shutdown()
+	// 
+	// if config := s1.JetStreamConfig(); config != nil {
 	// 	defer os.RemoveAll(config.StoreDir)
 	// }
 
@@ -1717,6 +1731,7 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	// Wait to get a quorum.
 	// NOTE: Cluster not ready error?
 	time.Sleep(5 * time.Second)
+	
 	jsm, err := mc.JetStream()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -1727,7 +1742,7 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 
 	_, err = jsm.AddStream(&nats.StreamConfig{
 		Name:     "foo",
-		Subjects: []string{"foo.A", "foo.B", "foo.C", "foo.D"},
+		Subjects: []string{"foo.A", "foo.B", "foo.C", "foo.DQ1", "foo.DQ2"},
 	})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -1754,13 +1769,12 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	}
 
 	t.Run("conn drain deletes ephemeral consumers", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 32*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		nc, err := nats.Connect(serverURL,
 			nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-				fmt.Println(time.Now(), "ERROR!!", err)
+				t.Logf("Error: %v", err)
 			}),
 			nats.ClosedHandler(func(_ *nats.Conn) {
-				fmt.Println(time.Now(), "DRAINED!")
 				cancel()
 			}))
 		if err != nil {
@@ -1779,7 +1793,7 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		}
 
 		// Ephemeral Queue Subscribe
-		_, err = js.QueueSubscribeSync("foo.D", "D1")
+		_, err = js.QueueSubscribeSync("foo.DQ1", "DQ1")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1795,7 +1809,8 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	jsm.Publish("foo.A", []byte("A.1"))
 	jsm.Publish("foo.B", []byte("B.1"))
 	jsm.Publish("foo.C", []byte("C.1"))
-	jsm.Publish("foo.D", []byte("D.1"))
+	jsm.Publish("foo.DQ1", []byte("D.1"))
+	jsm.Publish("foo.DQ2", []byte("D.1"))
 
 	t.Run("conn close does not delete any consumer", func(t *testing.T) {
 		nc, err := nats.Connect(serverURL)
@@ -1814,11 +1829,13 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		// Durable Subscribe
+		// Durable Subscribe: Exclusive
 		subB, err := js.SubscribeSync("foo.B", nats.Durable("B"))
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
+		nc.Flush()
+
 		resp, err := subB.NextMsg(2 * time.Second)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -1832,18 +1849,28 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		if got != expected {
 			t.Errorf("Expected %v, got: %v", expected, got)
 		}
-		fetchConsumers(t, 3)
+		fetchConsumers(t, 2)
 
-		// Durable Queue Subscribe
-		subD, err := js.QueueSubscribeSync("foo.D", "D1", nats.Durable("D"))
+		// Ephemeral: Queue Subscribe
+		subDQ1, err := js.QueueSubscribeSync("foo.DQ1", "DQ1")
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-		resp, err = subD.NextMsg(2 * time.Second)
+		resp, err = subDQ1.NextMsg(2 * time.Second)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-		// NOTE: D does not ack, so next time would receive D.1 again.
+
+		// Durable: Queue Subscribe
+		subDQ2, err := js.QueueSubscribeSync("foo.DQ2", "DQ2", nats.Durable("DQ2"))
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		resp, err = subDQ2.NextMsg(2 * time.Second)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		// NOTE: D does not ack, so next time DQ would receive D.1 again.
 		// resp.Ack()
 
 		// There will be still all consumers since nc.Close
@@ -1856,7 +1883,8 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	jsm.Publish("foo.A", []byte("A.2"))
 	jsm.Publish("foo.B", []byte("B.2"))
 	jsm.Publish("foo.C", []byte("C.2"))
-	jsm.Publish("foo.D", []byte("D.2"))
+	jsm.Publish("foo.DQ1", []byte("D.2"))
+	jsm.Publish("foo.DQ2", []byte("D.2"))
 
 	t.Run("reattached durables consumers can be deleted with unsubscribe", func(t *testing.T) {
 		nc, err := nats.Connect(serverURL)
@@ -1874,7 +1902,10 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 
 		// The durable interest remains so have to attach now,
 		// otherwise would get a stream already used error.
-		subB, err := js.SubscribeSync("foo.B", nats.Attach("foo", "B"))
+		// foo: stream
+		// B  : Durable
+		// subB, err := js.SubscribeSync("foo.B", nats.Attach("foo", "B"))
+		subB, err := js.SubscribeSync("foo.B", nats.Durable("B"))
 
 		// Created new subscriber.
 		// subB, err := js.SubscribeSync("foo.B", nats.Durable("B"))
@@ -1883,7 +1914,7 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		}
 
 		// No new consumers created since reattached to the same one.
-		fetchConsumers(t, 2)
+		fetchConsumers(t, 3)
 
 		resp, err := subB.NextMsg(2 * time.Second)
 		if err != nil {
