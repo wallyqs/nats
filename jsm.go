@@ -280,7 +280,7 @@ func (c *ConsumerLister) Next() bool {
 		c.err = err
 		return false
 	}
-	// fmt.Println(time.Now(), "--- LIST", string(r.Data))
+	fmt.Println(time.Now(), "--- LIST", string(r.Data))
 	if resp.Error != nil {
 		c.err = errors.New(resp.Error.Description)
 		return false

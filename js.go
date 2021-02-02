@@ -426,6 +426,7 @@ func (jsi *jsSub) unsubscribe(drainMode bool) error {
 		return nil
 	}
 
+	fmt.Println("---------->>>>>>>>>>>>>>>>>>>>", jsi.stream, jsi.consumer, "||||||||")
 	return js.DeleteConsumer(jsi.stream, jsi.consumer)
 }
 
@@ -503,7 +504,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 			deliver = NewInbox()
 		}
 	} else if shouldAttach {
-		info, err := js.getConsumerInfo(o.stream, o.consumer)
+		info, err := js.ConsumerInfo(o.stream, o.consumer)
 		if err != nil {
 			return nil, err
 		}
@@ -519,16 +520,49 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 			deliver = NewInbox()
 		}
 	} else {
+		// Lookup the stream
 		stream, err = js.lookupStreamBySubject(subj)
 		if err != nil {
 			return nil, err
 		}
-		deliver = NewInbox()
-		if !isPullMode {
-			cfg.DeliverSubject = deliver
+		fmt.Println("-----------", o.cfg.Durable)
+
+		var info *ConsumerInfo
+		if o.cfg.Durable != _EMPTY_ {
+			info, err = js.ConsumerInfo(stream, o.cfg.Durable)
+			// if err == nil {
+			// 	// It should reattach instead of creating.
+			// 	return nil, err
+			// }
+			// fmt.Println("-----------", consumer, err)
 		}
-		// Do filtering always, server will clear as needed.
-		cfg.FilterSubject = subj
+
+		// In case there is a durable already, it should reattach instead.
+		if err == nil && info != nil {
+			ccfg = &info.Config
+
+			// Make sure this new subject matches or is a subset.
+			if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
+				return nil, ErrSubjectMismatch
+			}
+			if ccfg.DeliverSubject != _EMPTY_ {
+				deliver = ccfg.DeliverSubject
+			} else {
+				deliver = NewInbox()
+			}
+			shouldCreate = false
+			shouldAttach = true
+			o.stream = stream
+			o.consumer = o.cfg.Durable
+		} else {
+			// Create logic
+			deliver = NewInbox()
+			if !isPullMode {
+				cfg.DeliverSubject = deliver
+			}
+			// Do filtering always, server will clear as needed.
+			cfg.FilterSubject = subj
+		}
 	}
 
 	var sub *Subscription
@@ -638,13 +672,16 @@ func (js *js) lookupStreamBySubject(subj string) (string, error) {
 	if err != nil {
 		return _EMPTY_, err
 	}
-	resp, err := js.nc.Request(js.apiSubj(apiStreams), j, js.wait)
+	sj := js.apiSubj(apiStreams)
+	fmt.Println(sj, string(j))
+	resp, err := js.nc.Request(sj, j, js.wait)
 	if err != nil {
 		if err == ErrNoResponders {
 			err = ErrJetStreamNotEnabled
 		}
 		return _EMPTY_, err
 	}
+	fmt.Println("????????????", string(resp.Data))
 	if err := json.Unmarshal(resp.Data, &slr); err != nil {
 		return _EMPTY_, err
 	}
@@ -828,6 +865,7 @@ func (sub *Subscription) Poll() error {
 
 func (js *js) getConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
 	ccInfoSubj := fmt.Sprintf(apiConsumerInfoT, stream, consumer)
+	// fmt.Println(">>>>>>>>>>>>>", ccInfoSubj)
 	resp, err := js.nc.Request(js.apiSubj(ccInfoSubj), nil, js.wait)
 	if err != nil {
 		if err == ErrNoResponders {

@@ -1870,7 +1870,9 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
-		// NOTE: D does not ack, so next time DQ would receive D.1 again.
+		t.Logf("RECEIVED: %+v", string(resp.Data))
+
+		// NOTE: D does not ack, so next time DQ would receive D.2 again.
 		// resp.Ack()
 
 		// There will be still all consumers since nc.Close
@@ -1914,7 +1916,7 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		}
 
 		// No new consumers created since reattached to the same one.
-		fetchConsumers(t, 3)
+		fetchConsumers(t, 4)
 
 		resp, err := subB.NextMsg(2 * time.Second)
 		if err != nil {
@@ -1930,10 +1932,19 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		jsm.Publish("foo.B", []byte("B.3"))
 
 		// Attach again to the same subject with the durable.
-		dupSub, err := js.SubscribeSync("foo.B", nats.Attach("foo", "B"))
+		// dupSub, err := js.SubscribeSync("foo.B", nats.Attach("foo", "B"))
+		dupSub, err := js.SubscribeSync("foo.B", nats.Durable("B"))
+
+		// TODO: Should this be an error?
+		t.Logf("========================<<><><>><<><><>><><<><>><== %+v", err)
+
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		// NOTE: Reattached to the same one durable that is already in use,
+		// so will not be able to receive messages.
+		fetchConsumers(t, 4)
 
 		// The same durable is already used, so this dup durable
 		// subscription won't receive the message.
@@ -1963,13 +1974,28 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Unexpected success")
 		}
-		if err.Error() != `consumer not found` {
+		if err.Error() != `account not found` {
 			t.Errorf("Expected consumer not found error, got: %v", err)
 		}
 
 		// Remains an ephemeral consumer that did not get deleted
 		// when Close() was called.
-		fetchConsumers(t, 1)
+		fetchConsumers(t, 3)
+
+		// QUEUE Subscribe
+
+		// Durable: Queue Subscribe
+		subDQ2, err := js.QueueSubscribeSync("foo.DQ2", "DQ2", nats.Durable("DQ2"))
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		resp, err = subDQ2.NextMsg(2 * time.Second)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		t.Logf("RECEIVED: %+v", string(resp.Data))
+
+		fetchConsumers(t, 3)
 	})
 }
 
