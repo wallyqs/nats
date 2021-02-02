@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
+	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 )
 
@@ -620,6 +621,16 @@ func TestJetStreamManagement(t *testing.T) {
 	if err := cl.Err(); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
+
+	// sub, err := js.SubscribeSync("foo")
+	// if err != nil {
+	// 	t.Errorf("Unexpected error: %v", err)
+	// }
+	// info, err := sub.ConsumerInfo()
+	// if err != nil {
+	// 	t.Errorf("Unexpected error: %v", err)
+	// }
+	// js.DeleteConsumer("foo", info.)
 
 	// Delete a consumer using our client API.
 	if err := js.DeleteConsumer("", ""); err == nil {
@@ -1651,22 +1662,68 @@ func TestJetStream_Unsubscribe(t *testing.T) {
 }
 
 func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
-	s := RunBasicJetStreamServer()
-	defer s.Shutdown()
+	// Create JS Cluster
+	routes := server.RoutesFromStr("nats://127.0.0.1:9622,nats://127.0.0.1:9623,nats://127.0.0.1:9624")
 
-	if config := s.JetStreamConfig(); config != nil {
-		defer os.RemoveAll(config.StoreDir)
-	}
+	o1 := natsserver.DefaultTestOptions
+	o1.Host = "127.0.0.1"
+	o1.Port = 9422
+	o1.ServerName = "A"
+	o1.Cluster.Host = "127.0.0.1"
+	o1.Cluster.Port = 9622
+	o1.Cluster.Name = "jsc"
+	o1.JetStream = true
+	o1.Routes = routes
+	s1 := natsserver.RunServer(&o1)
+	defer s1.Shutdown()
 
-	serverURL := s.ClientURL()
+	o2 := natsserver.DefaultTestOptions
+	o2.Host = "127.0.0.1"
+	o2.Port = 9423
+	o2.ServerName = "B"
+	o2.Cluster.Host = "127.0.0.1"
+	o2.Cluster.Port = 9623
+	o2.Cluster.Name = "jsc"
+	o2.JetStream = true
+	o2.Routes = routes
+	s2 := natsserver.RunServer(&o2)
+	defer s2.Shutdown()
+
+	o3 := natsserver.DefaultTestOptions
+	o3.Host = "127.0.0.1"
+	o3.Port = 9424
+	o3.ServerName = "C"
+	o3.Cluster.Host = "127.0.0.1"
+	o3.Cluster.Port = 9624
+	o3.Cluster.Name = "jsc"
+	o3.JetStream = true
+	o3.Routes = routes
+	s3 := natsserver.RunServer(&o3)
+	defer s3.Shutdown()
+
+	// s := RunBasicJetStreamServer()
+	// defer s.Shutdown()
+
+	// if config := s.JetStreamConfig(); config != nil {
+	// 	defer os.RemoveAll(config.StoreDir)
+	// }
+
+	serverURL := s1.ClientURL()
 	mc, err := nats.Connect(serverURL)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+
+	// Wait to get a quorum.
+	// NOTE: Cluster not ready error?
+	time.Sleep(5 * time.Second)
 	jsm, err := mc.JetStream()
 	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
+		t.Fatalf("Unexpected error: %v", err)
 	}
+
+	// NOTE: Sometimes on restart some of the state can remain.
+	jsm.DeleteStream("foo")
 
 	_, err = jsm.AddStream(&nats.StreamConfig{
 		Name:     "foo",
@@ -1697,11 +1754,15 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 	}
 
 	t.Run("conn drain deletes ephemeral consumers", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		nc, err := nats.Connect(serverURL, nats.ClosedHandler(func(_ *nats.Conn) {
-			fmt.Println("DRAINED!")
-			cancel()
-		}))
+		ctx, cancel := context.WithTimeout(context.Background(), 32*time.Second)
+		nc, err := nats.Connect(serverURL,
+			nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+				fmt.Println(time.Now(), "ERROR!!", err)
+			}),
+			nats.ClosedHandler(func(_ *nats.Conn) {
+				fmt.Println(time.Now(), "DRAINED!")
+				cancel()
+			}))
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -1814,7 +1875,7 @@ func TestJetStream_UnsubscribeCloseDrain(t *testing.T) {
 		// The durable interest remains so have to attach now,
 		// otherwise would get a stream already used error.
 		subB, err := js.SubscribeSync("foo.B", nats.Attach("foo", "B"))
-		
+
 		// Created new subscriber.
 		// subB, err := js.SubscribeSync("foo.B", nats.Durable("B"))
 		if err != nil {

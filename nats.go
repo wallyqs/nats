@@ -4243,8 +4243,13 @@ func (nc *Conn) drainConnection() {
 	}
 
 	subs := make([]*Subscription, 0, len(nc.subs))
+	jsubs := make([]*Subscription, 0)
 	for _, s := range nc.subs {
-		subs = append(subs, s)
+		if s.jsi != nil {
+			jsubs = append(jsubs, s)
+		} else {
+			subs = append(subs, s)
+		}
 	}
 	errCB := nc.Opts.AsyncErrorCB
 	drainWait := nc.Opts.DrainTimeout
@@ -4260,7 +4265,15 @@ func (nc *Conn) drainConnection() {
 		nc.mu.Unlock()
 	}
 
-	// Do subs first
+	// Drain JetStream subscriptions which rely on
+	// the Request handler for JS API responses.
+	for _, s := range jsubs {
+		if err := s.Drain(); err != nil {
+			pushErr(err)
+		}
+	}
+
+	// Do subs first.
 	for _, s := range subs {
 		if err := s.Drain(); err != nil {
 			// We will notify about these but continue.

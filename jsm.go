@@ -204,8 +204,9 @@ func (js *js) DeleteConsumer(stream, durable string) error {
 	}
 
 	dcSubj := js.apiSubj(fmt.Sprintf(apiConsumerDeleteT, stream, durable))
-	fmt.Println("--- DELETING ::: ", dcSubj, "|||||", stream, durable)
+	// fmt.Println(time.Now(), "--- DELETING ::: ", dcSubj, "|||||", stream, durable)
 	r, err := js.nc.Request(dcSubj, nil, js.wait)
+	// fmt.Println(time.Now(), "--- DELETED? ::: ", dcSubj, "|||||", stream, durable, err, string(r.Data))
 	if err != nil {
 		return err
 	}
@@ -279,6 +280,7 @@ func (c *ConsumerLister) Next() bool {
 		c.err = err
 		return false
 	}
+	fmt.Println(time.Now(), "--- LIST", string(r.Data))
 	if resp.Error != nil {
 		c.err = errors.New(resp.Error.Description)
 		return false
