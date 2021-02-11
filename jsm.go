@@ -24,19 +24,19 @@ import (
 
 // JetStreamManager is the public interface for managing JetStream streams & consumers.
 type JetStreamManager interface {
-	// Create a stream.
+	// AddStream adds a stream.
 	AddStream(cfg *StreamConfig) (*StreamInfo, error)
 
-	// Update a stream.
+	// UpdateStream updates a stream.
 	UpdateStream(cfg *StreamConfig) (*StreamInfo, error)
 
-	// Delete a stream.
+	// DeleteStream deletes a stream.
 	DeleteStream(name string) error
 
-	// Stream information.
+	// StreamInfo retrieves a information from a Stream.
 	StreamInfo(stream string) (*StreamInfo, error)
 
-	// Purge stream messages.
+	// PurgeStream purges a stream messages.
 	PurgeStream(name string) error
 
 	// StreamsInfo can be used to retrieve a list of StreamInfo objects.
@@ -48,17 +48,17 @@ type JetStreamManager interface {
 	// DeleteMsg erases a message from a Stream.
 	DeleteMsg(name string, seq uint64) error
 
-	// Create a consumer.
+	// AddConsumer creates a consumer.
 	AddConsumer(stream string, cfg *ConsumerConfig) (*ConsumerInfo, error)
 
-	// Delete a consumer.
+	// DeleteConsumer deletes a consumer.
 	DeleteConsumer(stream, consumer string) error
 
-	// Consumer information.
+	// ConsumerInfo retrieves information of a consumer from a stream.
 	ConsumerInfo(stream, name string) (*ConsumerInfo, error)
 
-	// NewConsumerLister is used to return pages of ConsumerInfo objects.
-	NewConsumerLister(stream string) *ConsumerLister
+	// ConsumersInfo is used to retrieve a list of ConsumerInfo objects.
+	ConsumersInfo(stream string) <-chan *ConsumerInfo
 
 	// AccountInfo retrieves info about the JetStream usage from an account.
 	AccountInfo() (*AccountInfo, error)
@@ -248,9 +248,9 @@ func (js *js) ConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
 	return js.getConsumerInfo(stream, consumer)
 }
 
-// ConsumerLister fetches pages of ConsumerInfo objects. This object is not
+// consumerLister fetches pages of ConsumerInfo objects. This object is not
 // safe to use for multiple threads.
-type ConsumerLister struct {
+type consumerLister struct {
 	stream string
 	js     *js
 
@@ -258,6 +258,23 @@ type ConsumerLister struct {
 	offset   int
 	page     []*ConsumerInfo
 	pageInfo *apiPaged
+}
+
+// ConsumersInfo returns a receive only channel to iterate on the consumers info.
+func (js *js) ConsumersInfo(stream string) <-chan *ConsumerInfo {
+	ach := make(chan *ConsumerInfo)
+	cl := &consumerLister{stream: stream, js: js}
+	go func() {
+		for cl.Next() {
+			for _, info := range cl.Page() {
+				ach <- info
+			}
+		}
+
+		close(ach)
+	}()
+
+	return ach
 }
 
 // consumersRequest is the type used for Consumers requests.
@@ -273,7 +290,7 @@ type consumerListResponse struct {
 }
 
 // Next fetches the next ConsumerInfo page.
-func (c *ConsumerLister) Next() bool {
+func (c *consumerLister) Next() bool {
 	if c.err != nil {
 		return false
 	}
@@ -315,18 +332,13 @@ func (c *ConsumerLister) Next() bool {
 }
 
 // Page returns the current ConsumerInfo page.
-func (c *ConsumerLister) Page() []*ConsumerInfo {
+func (c *consumerLister) Page() []*ConsumerInfo {
 	return c.page
 }
 
 // Err returns any errors found while fetching pages.
-func (c *ConsumerLister) Err() error {
+func (c *consumerLister) Err() error {
 	return c.err
-}
-
-// NewConsumerLister is used to return pages of ConsumerInfo objects.
-func (js *js) NewConsumerLister(stream string) *ConsumerLister {
-	return &ConsumerLister{stream: stream, js: js}
 }
 
 // streamCreateResponse stream creation.
@@ -600,22 +612,6 @@ func (js *js) PurgeStream(name string) error {
 	return nil
 }
 
-// StreamLister fetches StreamInfo objects. This object is not safe
-// to use for multiple threads.
-type StreamLister interface {
-	// Next fetches the next page of streams.
-	Next() bool
-
-	// Page() is a collection of streams.
-	Page() []*StreamInfo
-
-	// Err() is the sticky error like Scanner.
-	Err() error
-
-	// Streams is a receive only channel to iterate over streams.
-	Streams() <-chan *StreamInfo
-}
-
 // streamLister fetches pages of StreamInfo objects. This object is not safe
 // to use for multiple threads.
 type streamLister struct {
@@ -627,7 +623,7 @@ type streamLister struct {
 	pageInfo *apiPaged
 }
 
-// Streams returns a receive only channel to iterate on the streams.
+// StreamsInfo returns a receive only channel to iterate on the streams.
 func (js *js) StreamsInfo() <-chan *StreamInfo {
 	ach := make(chan *StreamInfo)
 	sl := &streamLister{js: js}
