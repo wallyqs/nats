@@ -761,6 +761,18 @@ func TestJetStreamManagement(t *testing.T) {
 		t.Errorf("Expected single stream: %v", err)
 	}
 
+	// Give an already canceled context so that iteration stops immediately.
+	ctx, done := context.WithCancel(context.Background())
+	done()
+
+	i = 0
+	for range js.StreamsInfo(nats.Context(ctx)) {
+		i++
+	}
+	if i != 0 {
+		t.Errorf("Expected no streams, got %v", i)
+	}
+
 	called := false
 	for range js.ConsumersInfo("") {
 		called = true

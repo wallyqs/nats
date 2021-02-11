@@ -14,6 +14,7 @@
 package nats
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,7 @@ type JetStreamManager interface {
 	PurgeStream(name string) error
 
 	// StreamsInfo can be used to retrieve a list of StreamInfo objects.
-	StreamsInfo() <-chan *StreamInfo
+	StreamsInfo(opts ...JSAPIReqOpt) <-chan *StreamInfo
 
 	// GetMsg retrieves a raw stream message stored in JetStream by sequence number.
 	GetMsg(name string, seq uint64) (*RawStreamMsg, error)
@@ -58,7 +59,7 @@ type JetStreamManager interface {
 	ConsumerInfo(stream, name string) (*ConsumerInfo, error)
 
 	// ConsumersInfo is used to retrieve a list of ConsumerInfo objects.
-	ConsumersInfo(stream string) <-chan *ConsumerInfo
+	ConsumersInfo(stream string, opts ...JSAPIReqOpt) <-chan *ConsumerInfo
 
 	// AccountInfo retrieves info about the JetStream usage from an account.
 	AccountInfo() (*AccountInfo, error)
@@ -130,6 +131,24 @@ type AccountInfo struct {
 type APIStats struct {
 	Total  uint64 `json:"total"`
 	Errors uint64 `json:"errors"`
+}
+
+// jsAPIReqOpts are JetStream API request options.
+type jsAPIReqOpts struct {
+	ctx context.Context
+	ttl time.Duration
+}
+
+// jsAPIReqOptFn is a function option used to configure a JetStream API request.
+type jsAPIReqOptFn func(opts *jsAPIReqOpts) error
+
+func (opt jsAPIReqOptFn) configureAPIRequest(opts *jsAPIReqOpts) error {
+	return opt(opts)
+}
+
+// JSAPIReqOpt configures options for JetStream API requests.
+type JSAPIReqOpt interface {
+	configureAPIRequest(opts *jsAPIReqOpts) error
 }
 
 // AccountLimits includes the JetStream limits of the current account.
@@ -261,7 +280,7 @@ type consumerLister struct {
 }
 
 // ConsumersInfo returns a receive only channel to iterate on the consumers info.
-func (js *js) ConsumersInfo(stream string) <-chan *ConsumerInfo {
+func (js *js) ConsumersInfo(stream string, opts ...JSAPIReqOpt) <-chan *ConsumerInfo {
 	ach := make(chan *ConsumerInfo)
 	cl := &consumerLister{stream: stream, js: js}
 	go func() {
@@ -624,13 +643,45 @@ type streamLister struct {
 }
 
 // StreamsInfo returns a receive only channel to iterate on the streams.
-func (js *js) StreamsInfo() <-chan *StreamInfo {
-	ach := make(chan *StreamInfo)
+func (js *js) StreamsInfo(opts ...JSAPIReqOpt) <-chan *StreamInfo {
+	var o jsAPIReqOpts
+	var ach = make(chan *StreamInfo)
+	for _, opt := range opts {
+		if err := opt.configureAPIRequest(&o); err != nil {
+			// Close the channel to stop iteration altogether.
+			close(ach)
+			return ach
+		}
+	}
+
 	sl := &streamLister{js: js}
+
 	go func() {
-		for sl.Next() {
-			for _, info := range sl.Page() {
-				ach <- info
+		ctx := o.ctx
+	Loop:
+		for {
+			// Check if the context is done.
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					break Loop
+				default:
+				}
+			}
+
+			if sl.Next(&o) {
+				for _, info := range sl.Page() {
+					if ctx != nil {
+						select {
+						case <-ctx.Done():
+							break Loop
+						default:
+						}
+					}
+					ach <- info
+				}
+			} else {
+				break
 			}
 		}
 
@@ -656,7 +707,7 @@ type streamNamesRequest struct {
 }
 
 // Next fetches the next StreamInfo page.
-func (s *streamLister) Next() bool {
+func (s *streamLister) Next(opts *jsAPIReqOpts) bool {
 	if s.err != nil {
 		return false
 	}
@@ -673,11 +724,22 @@ func (s *streamLister) Next() bool {
 	}
 
 	slSubj := s.js.apiSubj(apiStreamList)
-	r, err := s.js.nc.Request(slSubj, req, s.js.wait)
-	if err != nil {
-		s.err = err
-		return false
+
+	var r *Msg
+	if opts.ctx != nil {
+		r, err = s.js.nc.RequestWithContext(opts.ctx, slSubj, req)
+		if err != nil {
+			s.err = err
+			return false
+		}
+	} else {
+		r, err = s.js.nc.Request(slSubj, req, s.js.wait)
+		if err != nil {
+			s.err = err
+			return false
+		}
 	}
+
 	var resp streamListResponse
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		s.err = err

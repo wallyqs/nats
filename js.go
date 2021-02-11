@@ -352,6 +352,11 @@ func (ctx ContextOpt) configurePublish(opts *pubOpts) error {
 	return nil
 }
 
+func (ctx ContextOpt) configureAPIRequest(opts *jsAPIReqOpts) error {
+	opts.ctx = ctx
+	return nil
+}
+
 // Context returns an option that can be used to configure a context.
 func Context(ctx context.Context) ContextOpt {
 	return ContextOpt{ctx}
