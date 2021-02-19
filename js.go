@@ -403,6 +403,7 @@ type nextRequest struct {
 	Expires *time.Time `json:"expires,omitempty"`
 	Batch   int        `json:"batch,omitempty"`
 	NoWait  bool       `json:"no_wait,omitempty"`
+	DeliverTo string   `json:"deliver_to,omitempty"`
 }
 
 // jsSub includes JetStream subscription info.
@@ -636,6 +637,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// If we are pull based go ahead and fire off the first request to populate.
 	if isPullMode {
 		sub.jsi.pull = o.pull
+		// Remove when AutoPull is disabled.
 		sub.Poll()
 	}
 
@@ -836,6 +838,57 @@ func (sub *Subscription) Poll() error {
 	return nc.PublishRequest(reqNext, reply, req)
 }
 
+// Pull synchronously waits for requested messages to flow.
+func (sub *Subscription) Pull(opts ...PubOpt) error {
+	var o pubOpts
+	if len(opts) > 0 {
+		for _, opt := range opts {
+			if err := opt.configurePublish(&o); err != nil {
+				return err
+			}
+		}
+	}
+	// Default is no wait, so async.
+	if o.ctx != nil && o.ttl != 0 {
+		return ErrContextAndTimeout
+	}
+
+	sub.mu.Lock()
+	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull == 0 {
+		sub.mu.Unlock()
+		return ErrTypeSubscription
+	}
+	batch := sub.jsi.pull
+	nc, reply := sub.conn, sub.Subject
+	stream, consumer := sub.jsi.stream, sub.jsi.consumer
+	js := sub.jsi.js
+
+	sub.mu.Unlock()
+
+	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
+
+	if o.ttl > 0 {
+		// Adding a deliver to will feed the consumer inbox
+		// but send the response of the pull request to this
+		// request.
+		req, _ := json.Marshal(&nextRequest{Batch: batch, DeliverTo: reply})
+		resp, err := nc.Request(reqNext, req, o.ttl)
+		if err != nil {
+			return err
+		}
+	} else {
+		// Auto Pull mode, deliver asynchronously the result
+		// of the pull request to the consumer inbox.
+		req, _ := json.Marshal(&nextRequest{Batch: batch})
+		err := nc.PublishRequest(reqNext, reply, req)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (js *js) getConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
 	ccInfoSubj := fmt.Sprintf(apiConsumerInfoT, stream, consumer)
 	resp, err := js.nc.Request(js.apiSubj(ccInfoSubj), nil, js.wait)
@@ -911,11 +964,18 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...PubOpt) error {
 	}
 
 	if isPullMode {
+		// Ack + Auto Pull the next message.
 		if bytes.Equal(ackType, AckAck) {
-			err = nc.PublishRequest(m.Reply, m.Sub.Subject, AckNext)
+			// TODO: Add NoAutoPull option
+			// err = nc.PublishRequest(m.Reply, m.Sub.Subject, AckNext)
+			// fmt.Println("Sending AckNext....... to fetch msg", err)
 		} else if bytes.Equal(ackType, AckNak) || bytes.Equal(ackType, AckTerm) {
 			err = nc.PublishRequest(m.Reply, m.Sub.Subject, []byte("+NXT {\"batch\":1}"))
 		}
+
+		// Ack and await for response from server that has processed the ack.
+		// FIXME: With auto pull, this means that there is a double ack, which
+		// should be avoided.
 		if sync && err == nil {
 			if ctx != nil {
 				_, err = nc.RequestWithContext(ctx, m.Reply, nil)
