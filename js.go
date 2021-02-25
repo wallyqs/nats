@@ -847,7 +847,7 @@ func SampleFrequency(s string) SubOpt {
 	})
 }
 
-func MaxWaiting(n int) SubOpt {
+func PullMaxWaiting(n int) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.MaxWaiting = n
 		return nil
