@@ -332,11 +332,6 @@ func ExpectLastMsgId(id string) PubOpt {
 // MaxWait sets the maximum amount of time we will wait for a response.
 type MaxWait time.Duration
 
-func (ttl MaxWait) configurePublish(opts *pubOpts) error {
-	opts.ttl = time.Duration(ttl)
-	return nil
-}
-
 func (ttl MaxWait) configureJSContext(js *js) error {
 	js.wait = time.Duration(ttl)
 	return nil
