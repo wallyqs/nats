@@ -337,6 +337,19 @@ func (ttl MaxWait) configureJSContext(js *js) error {
 	return nil
 }
 
+// AckWait sets the maximum amount of time we will wait for an ack.
+type AckWait time.Duration
+
+func (ttl AckWait) configurePublish(opts *pubOpts) error {
+	opts.ttl = time.Duration(ttl)
+	return nil
+}
+
+func (ttl AckWait) configureSubscribe(opts *subOpts) error {
+	opts.cfg.AckWait = time.Duration(ttl)
+	return nil
+}
+
 // ContextOpt is an option used to set a context.Context.
 type ContextOpt struct {
 	context.Context
@@ -789,13 +802,6 @@ func AckAll() SubOpt {
 func AckExplicit() SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.AckPolicy = AckExplicitPolicy
-		return nil
-	})
-}
-
-func AckWait(d time.Duration) SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.AckWait = d
 		return nil
 	})
 }
