@@ -812,13 +812,6 @@ func MaxDeliver(n int) SubOpt {
 	})
 }
 
-func FilterSubject(s string) SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.FilterSubject = s
-		return nil
-	})
-}
-
 func PlaybackInstant() SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.ReplayPolicy = ReplayInstant
