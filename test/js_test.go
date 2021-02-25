@@ -564,6 +564,66 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 }
 
+func TestAckPendingGoesDown(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer s.Shutdown()
+
+	if config := s.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo", "bar", "baz", "foo.*"},
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	const totalMsgs = 3
+	for i := 0; i < totalMsgs; i++ {
+		if _, err := js.Publish("foo", []byte(fmt.Sprintf("msg %d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sub, err := js.SubscribeSync("foo", nats.Durable("dname"), nats.Pull(totalMsgs), nats.AckExplicit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Unsubscribe()
+
+	for i := totalMsgs; i > 0; i-- {
+		info, err := sub.ConsumerInfo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := info.NumAckPending, i; got != want {
+			t.Fatalf("unexpected num ack pending: got=%d, want=%d", got, want)
+		}
+
+		m, err := sub.NextMsg(100 * time.Millisecond)
+		if err != nil {
+			t.Fatal("NextMsg:", err)
+		}
+
+		if err := m.Ack(); err != nil {
+			t.Fatal("Ack:", err)
+		}
+	}
+}
+
 func TestJetStream_Drain(t *testing.T) {
 	s := RunBasicJetStreamServer()
 	defer s.Shutdown()
