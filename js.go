@@ -495,6 +495,11 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		return nil, ErrPullModeNotAllowed
 	}
 
+	badPullAck := o.cfg.AckPolicy == AckNonePolicy || o.cfg.AckPolicy == AckAllPolicy
+	if isPullMode && badPullAck {
+		return nil, fmt.Errorf("invalid ack mode for pull consumers: %s", o.cfg.AckPolicy)
+	}
+
 	var (
 		err          error
 		shouldCreate bool
