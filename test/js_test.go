@@ -3524,15 +3524,13 @@ func testJetStreamPullOptions(t *testing.T, srvs ...*jsServer) {
 
 		// Extra pull to buffer more messages:
 		//
-		// 1 from Initial Pull + 9 extra from the batch request.
-		//
-		err = sub.Pull(nats.BatchSize(9))
+		err = sub.Pull(nats.BatchSize(10), nats.MaxWait(2*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
 		nc.Flush()
 
-		checkForPending(t, sub, 10, 2*time.Second)
+		// checkForPending(t, sub, 10, 2*time.Second)
 
 		ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
 		defer done()
@@ -3575,17 +3573,23 @@ func testJetStreamPullOptions(t *testing.T, srvs ...*jsServer) {
 			t.Errorf("Expected timeout fetching next message, got: %v (msg=%+v)", err, resp)
 		}
 
-		// Poll more than the default max of waiting/inflight pull requests.
-		for i := 0; i < 512; i++ {
-			sub.Pull(nats.BatchSize(1))
+		// Poll more than the default max of waiting/inflight pull requests,
+		// so that We will get only 408 timeout errors.
+		errCh := make(chan error, 1)
+		for i := 0; i < 1024; i++ {
+			go func() {
+				err = sub.Pull(nats.BatchSize(1), nats.MaxWait(2*time.Second))
+				if err != nil {
+					errCh <- err
+				}
+			}()
 		}
 		nc.FlushTimeout(1 * time.Second)
 
-		// We will get only 408 timeout errors.
-		checkForPending(t, sub, 10, 2*time.Second)
-
-		for i := 0; i < 10; i++ {
-			_, err = sub.NextMsg(50 * time.Millisecond)
+		select {
+		case <-time.After(1 * time.Second):
+			t.Fatal("Expected RequestTimeout (408) error due to many inflight pulls")
+		case err := <-errCh:
 			if err.Error() != `Request Timeout` {
 				t.Errorf("Expected request timeout fetching next message, got: %+v", err)
 			}
@@ -3608,7 +3612,7 @@ func testJetStreamPullOptions(t *testing.T, srvs ...*jsServer) {
 		nc.Flush()
 
 		// 1 from Initial Pull + 9 extra from the batch request + 1 error 404 msg.
-		checkForPending(t, sub, 11, 2*time.Second)
+		checkForPending(t, sub, 10, 2*time.Second)
 
 		ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
 		defer done()
@@ -3644,30 +3648,21 @@ func testJetStreamPullOptions(t *testing.T, srvs ...*jsServer) {
 			t.Fatalf("Got %v messages, expected at least: %v", got, totalMsgs)
 		}
 
-		resp, err := sub.NextMsg(250 * time.Millisecond)
+		err = sub.Pull(nats.BatchSize(10), nats.PullNoWait(), nats.MaxWait(2*time.Second))
 		if err.Error() != `No Messages` {
-			t.Errorf("Expected error fetching next message, got: %+v (msg=%+v)", err, resp)
+			t.Errorf("Expected error fetching next message, got: %+v", err)
 		}
 
 		// Next message will timeout since there are no more.
-		resp, err = sub.NextMsg(250 * time.Millisecond)
+		_, err = sub.NextMsg(250 * time.Millisecond)
 		if err != nats.ErrTimeout {
-			t.Errorf("Expected timeout fetching next message, got: %v (msg=%+v)", err, resp)
+			t.Errorf("Expected timeout fetching next message, got: %v", err)
 		}
 
 		// There should only be 404 errors since no more messages.
-		totalPolls := 512
-		for i := 0; i < totalPolls; i++ {
-			sub.Pull(nats.BatchSize(1), nats.PullNoWait())
-		}
-		nc.FlushTimeout(1 * time.Second)
-		checkForPending(t, sub, totalPolls, 2*time.Second)
-
-		for i := 0; i < totalPolls; i++ {
-			_, err = sub.NextMsg(50 * time.Millisecond)
-			if err.Error() != `No Messages` {
-				t.Errorf("Expected request timeout fetching next message, got: %+v", err)
-			}
+		err = sub.Pull(nats.BatchSize(1), nats.PullNoWait(), nats.MaxWait(2*time.Second))
+		if err.Error() != `No Messages` {
+			t.Errorf("Expected request timeout fetching next message, got: %+v", err)
 		}
 	})
 }

@@ -410,10 +410,9 @@ type SequencePair struct {
 
 // nextRequest is for getting next messages for pull based consumers from JetStream.
 type nextRequest struct {
-	Expires   *time.Time `json:"expires,omitempty"`
-	Batch     int        `json:"batch,omitempty"`
-	NoWait    bool       `json:"no_wait,omitempty"`
-	DeliverTo string     `json:"deliver_to,omitempty"`
+	Expires *time.Time `json:"expires,omitempty"`
+	Batch   int        `json:"batch,omitempty"`
+	NoWait  bool       `json:"no_wait,omitempty"`
 }
 
 // jsSub includes JetStream subscription info.
@@ -911,27 +910,78 @@ func (sub *Subscription) Pull(opts ...PullOpt) error {
 	nc, reply := sub.conn, sub.Subject
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	js := sub.jsi.js
+	mch := sub.mch
 	sub.mu.Unlock()
 
 	nr := &nextRequest{Batch: batch, NoWait: o.noWait}
-
+	req, _ := json.Marshal(nr)
 	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
-
 	if o.ttl > 0 {
-		// Adding a deliver to will feed the consumer inbox
-		// but send the response of the pull request to this
-		// request.
-		nr.DeliverTo = reply
-		req, _ := json.Marshal(nr)
-		resp, err := nc.Request(reqNext, req, o.ttl)
+		// Make an old style request, we will wait for first response
+		// in case of errors, then dispatch the rest of the replies
+		// to the channel.
+		inbox := NewInbox()
+		ch := make(chan *Msg, batch)
+
+		s, err := nc.subscribe(inbox, _EMPTY_, nil, ch, true, nil)
 		if err != nil {
 			return err
 		}
-		fmt.Println("Pull Response:", resp)
+		s.AutoUnsubscribe(batch)
+
+		err = nc.publish(reqNext, inbox, nil, req)
+		if err != nil {
+			return err
+		}
+
+		// We should be getting the response from the server,
+		// in case we got a poll error then stop and cleanup.
+		msg, err := s.NextMsg(o.ttl)
+		if err != nil {
+			// Unsubscribe and cleanup.
+			// fmt.Println("Internal Error: ", err)
+			s.Unsubscribe()
+			return err
+		}
+
+		// Check for empty payload message and process synchronously
+		// any status messages.
+		if len(msg.Data) == 0 {
+			switch msg.Header.Get(statusHdr) {
+			case noResponders:
+				return ErrNoResponders
+			case "400", "404", "408", "409":
+				return errors.New(msg.Header.Get(descrHdr))
+			}
+		}
+
+		// No errors so send the first msg and the rest
+		// to the consumer channel.
+		go func() {
+			// TODO: Use a context that is the same as
+			// MaxWait to cancel altogether so that
+			// these pull requests do not linger.
+			defer s.Unsubscribe()
+
+			// Send the first message to the original consumer.
+			mch <- msg
+
+			// TODO: Have a default cancellation based on MaxWait
+			recvd := 1
+			for recvd < batch {
+				nextMsg, err := s.NextMsg(o.ttl)
+				if err != nil {
+					fmt.Println("Error on next msg:", err)
+					continue
+				}
+				recvd++
+				mch <- nextMsg
+			}
+		}()
+
 	} else {
 		// Deliver asynchronously the result of the pull request
 		// to the consumer inbox.
-		req, _ := json.Marshal(nr)
 		err := nc.PublishRequest(reqNext, reply, req)
 		if err != nil {
 			return err
