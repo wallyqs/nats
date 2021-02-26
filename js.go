@@ -337,6 +337,16 @@ func (ttl MaxWait) configureJSContext(js *js) error {
 	return nil
 }
 
+func (ttl MaxWait) configurePull(opts *pullOpts) error {
+	opts.ttl = time.Duration(ttl)
+	return nil
+}
+
+func (ttl MaxWait) configureJSContext(js *js) error {
+	js.wait = time.Duration(ttl)
+	return nil
+}
+
 // AckWait sets the maximum amount of time we will wait for an ack.
 type AckWait time.Duration
 
@@ -356,6 +366,11 @@ type ContextOpt struct {
 }
 
 func (ctx ContextOpt) configurePublish(opts *pubOpts) error {
+	opts.ctx = ctx
+	return nil
+}
+
+func (ctx ContextOpt) configurePull(opts *pullOpts) error {
 	opts.ctx = ctx
 	return nil
 }
@@ -408,9 +423,10 @@ type SequencePair struct {
 
 // nextRequest is for getting next messages for pull based consumers from JetStream.
 type nextRequest struct {
-	Expires *time.Time `json:"expires,omitempty"`
-	Batch   int        `json:"batch,omitempty"`
-	NoWait  bool       `json:"no_wait,omitempty"`
+	Expires   *time.Time `json:"expires,omitempty"`
+	Batch     int        `json:"batch,omitempty"`
+	NoWait    bool       `json:"no_wait,omitempty"`
+	DeliverTo string     `json:"deliver_to,omitempty"`
 }
 
 // jsSub includes JetStream subscription info.
@@ -649,7 +665,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// If we are pull based go ahead and fire off the first request to populate.
 	if isPullMode {
 		sub.jsi.pull = o.pull
-		sub.Pull()
+		// sub.Pull()
 	}
 
 	return sub, nil
@@ -881,6 +897,8 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 type pullOpts struct {
 	batchSize int
 	noWait    bool
+	ttl       time.Duration
+	ctx       context.Context
 }
 
 type PullOpt interface {
@@ -904,6 +922,11 @@ func (sub *Subscription) Pull(opts ...PullOpt) error {
 		}
 	}
 
+	// Default is no wait, so async.
+	if o.ctx != nil && o.ttl != 0 {
+		return ErrContextAndTimeout
+	}
+
 	sub.mu.Lock()
 	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull == 0 {
 		sub.mu.Unlock()
@@ -923,9 +946,30 @@ func (sub *Subscription) Pull(opts ...PullOpt) error {
 	sub.mu.Unlock()
 
 	nr := &nextRequest{Batch: batch, NoWait: o.noWait}
-	req, _ := json.Marshal(nr)
+
 	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
-	return nc.PublishRequest(reqNext, reply, req)
+
+	if o.ttl > 0 {
+		// Adding a deliver to will feed the consumer inbox
+		// but send the response of the pull request to this
+		// request.
+		nr.DeliverTo = reply
+		req, _ := json.Marshal(nr)
+		resp, err := nc.Request(reqNext, req, o.ttl)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Pull Response:", resp)
+	} else {
+		// Deliver asynchronously the result of the pull request
+		// to the consumer inbox.
+		req, _ := json.Marshal(nr)
+		err := nc.PublishRequest(reqNext, reply, req)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (js *js) getConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
@@ -1004,7 +1048,7 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...PubOpt) error {
 
 	if isPullMode {
 		if bytes.Equal(ackType, AckAck) {
-			err = nc.PublishRequest(m.Reply, m.Sub.Subject, AckNext)
+			// err = nc.PublishRequest(m.Reply, m.Sub.Subject, AckNext)
 		} else if bytes.Equal(ackType, AckNak) || bytes.Equal(ackType, AckTerm) {
 			err = nc.PublishRequest(m.Reply, m.Sub.Subject, []byte("+NXT {\"batch\":1}"))
 		}
