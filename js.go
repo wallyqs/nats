@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -410,10 +410,9 @@ type SequencePair struct {
 
 // nextRequest is for getting next messages for pull based consumers from JetStream.
 type nextRequest struct {
-	Expires   *time.Time `json:"expires,omitempty"`
-	Batch     int        `json:"batch,omitempty"`
-	NoWait    bool       `json:"no_wait,omitempty"`
-	DeliverTo string     `json:"deliver_to,omitempty"`
+	Expires time.Duration `json:"expires,omitempty"`
+	Batch   int           `json:"batch,omitempty"`
+	NoWait  bool          `json:"no_wait,omitempty"`
 }
 
 // jsSub includes JetStream subscription info.
@@ -422,7 +421,7 @@ type jsSub struct {
 	consumer string
 	stream   string
 	deliver  string
-	pull     int
+	pull     bool
 	durable  bool
 	attached bool
 }
@@ -493,7 +492,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		}
 	}
 
-	isPullMode := o.pull > 0
+	isPullMode := o.pull
 	if cb != nil && isPullMode {
 		return nil, ErrPullModeNotAllowed
 	}
@@ -647,7 +646,6 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// If we are pull based go ahead and fire off the first request to populate.
 	if isPullMode {
 		sub.jsi.pull = o.pull
-		// sub.Pull()
 	}
 
 	return sub, nil
@@ -689,8 +687,8 @@ func (js *js) lookupStreamBySubject(subj string) (string, error) {
 type subOpts struct {
 	// For attaching.
 	stream, consumer string
-	// For pull based consumers, batch size for pull
-	pull int
+	// For pull based consumers.
+	pull bool
 	// For manual ack
 	mack bool
 	// For creating or updating.
@@ -709,58 +707,10 @@ func Durable(name string) SubOpt {
 	})
 }
 
-// Pull defines the batch size of messages that will be received
-// when using pull based JetStream consumers.
-func Pull(batchSize int) SubOpt {
-	return BatchSize(batchSize)
-}
-
-// BatchSize defines the batch size of messages that will be received
-// when pulling from a consumer.
-type BatchSize int
-
-func (batchSize BatchSize) configureSubscribe(opts *subOpts) error {
-	if err := validateBatchSize(batchSize); err != nil {
-		return err
-	}
-
-	opts.pull = int(batchSize)
-	return nil
-}
-
-func (batchSize BatchSize) configurePull(opts *pullOpts) error {
-	if err := validateBatchSize(batchSize); err != nil {
-		return err
-	}
-
-	opts.batchSize = int(batchSize)
-	return nil
-}
-
-func validateBatchSize(batchSize BatchSize) error {
-	if batchSize == 0 {
-		return errors.New("nats: batch size of 0 not valid")
-	}
-
-	return nil
-}
-
-// PullNoWait defines whether to disable waiting when making a pull request.
-func PullNoWait() PullOpt {
-	return pullOptFn(func(opts *pullOpts) error {
-		opts.noWait = true
-		return nil
-	})
-}
-
-func PullDirect(stream, consumer string, batchSize int) SubOpt {
+// Pull marks a subscription as pull subscriber.
+func Pull() SubOpt {
 	return subOptFn(func(opts *subOpts) error {
-		if batchSize == 0 {
-			return errors.New("nats: batch size of 0 not valid")
-		}
-		opts.stream = stream
-		opts.consumer = consumer
-		opts.pull = batchSize
+		opts.pull = true
 		return nil
 	})
 }
@@ -863,10 +813,9 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 }
 
 type pullOpts struct {
-	batchSize int
-	noWait    bool
-	ttl       time.Duration
-	ctx       context.Context
+	noWait bool
+	ttl    time.Duration
+	ctx    context.Context
 }
 
 type PullOpt interface {
@@ -880,64 +829,157 @@ func (opt pullOptFn) configurePull(opts *pullOpts) error {
 	return opt(opts)
 }
 
-// Pull makes a request to be delivered a batch of messages
-// from a stream.
-func (sub *Subscription) Pull(opts ...PullOpt) error {
+// PullNoWait defines whether to disable waiting when making a pull request.
+func PullNoWait() PullOpt {
+	return pullOptFn(func(opts *pullOpts) error {
+		opts.noWait = true
+		return nil
+	})
+}
+
+// PullExpiresIn defines when to let the server expire an inflight pull request.
+func PullExpiresIn(duration time.Duration) PullOpt {
+	return pullOptFn(func(opts *pullOpts) error {
+		opts.ttl = duration
+		return nil
+	})
+}
+
+func (sub *Subscription) Pull() error {
+	// TODO: Keep for now.
+	return nil
+}
+
+// Fetch pulls a batch of messages from a stream for a pull consumer.
+func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	var o pullOpts
 	for _, opt := range opts {
 		if err := opt.configurePull(&o); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Default is no wait, so async.
 	if o.ctx != nil && o.ttl != 0 {
-		return ErrContextAndTimeout
+		return nil, ErrContextAndTimeout
 	}
 
 	sub.mu.Lock()
-	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull == 0 {
+	if sub.jsi == nil || !sub.jsi.pull {
 		sub.mu.Unlock()
-		return ErrTypeSubscription
+		return nil, ErrTypeSubscription
 	}
 
-	var batch int
-	if o.batchSize > 0 {
-		batch = o.batchSize
-	} else {
-		batch = sub.jsi.pull
-	}
-
-	nc, reply := sub.conn, sub.Subject
+	// FIXME: We don't need the original inbox from the subscriber anymore,
+	// maybe each consumer should have its own mux for responses?
+	nc, _ := sub.conn, sub.Subject
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	js := sub.jsi.js
+
+	ttl := o.ttl
+	if ttl == 0 {
+		ttl = js.wait
+	}
 	sub.mu.Unlock()
 
+	// PullNoWait will return 404 right away if there are no more messages.
+	// PullExpiresIn will give a duration to the server to expire our pull request
+	// to this inbox only and will serve the newest one.
+	// Default is to let the Pull linger until there are 512 waiting requests.
 	nr := &nextRequest{Batch: batch, NoWait: o.noWait}
-
+	req, _ := json.Marshal(nr)
 	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
 
-	if o.ttl > 0 {
-		// Adding a deliver to will feed the consumer inbox
-		// but send the response of the pull request to this
-		// request.
-		nr.DeliverTo = reply
-		req, _ := json.Marshal(nr)
-		resp, err := nc.Request(reqNext, req, o.ttl)
-		if err != nil {
-			return err
+	// Make an old style request, we will wait for first response
+	// in case of errors, then dispatch the rest of the replies
+	// to the channel.
+	inbox := NewInbox()
+
+	mch := make(chan *Msg, batch)
+	s, err := nc.subscribe(inbox, _EMPTY_, nil, mch, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	s.AutoUnsubscribe(batch)
+
+	err = nc.publish(reqNext, inbox, nil, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// We should be getting the response from the server,
+	// in case we got a poll error then stop and cleanup.
+	t := globalTimerPool.Get(ttl)
+	defer globalTimerPool.Put(t)
+
+	// msg, err := s.NextMsg(ttl)
+	// if err != nil {
+	// 	// Unsubscribe and cleanup.
+	// 	fmt.Println("Internal Error: ", err)
+	// 	s.Unsubscribe()
+	// 	return nil, err
+	// }
+
+	// Check for empty payload message and process synchronously
+	// any status messages.
+	checkMsg := func(msg *Msg) error {
+		if len(msg.Data) == 0 {
+			switch msg.Header.Get(statusHdr) {
+			case noResponders:
+				return ErrNoResponders
+			case "400", "404", "408", "409":
+				return errors.New(msg.Header.Get(descrHdr))
+			}
 		}
-		fmt.Println("Pull Response:", resp)
-	} else {
-		// Deliver asynchronously the result of the pull request
-		// to the consumer inbox.
-		req, _ := json.Marshal(nr)
-		err := nc.PublishRequest(reqNext, reply, req)
+		return nil
+	}
+
+	msgs := make([]*Msg, 0)
+	select {
+	case msg, ok := <-mch:
+		if !ok {
+			err = s.getNextMsgErr()
+		} else {
+			err = s.processNextMsgDelivered(msg)
+			if err == nil {
+				err = checkMsg(msg)
+			}
+		}
+		msgs = append(msgs, msg)
+	case <-t.C:
+		return nil, ErrTimeout
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	recvd := 1
+	for {
+		select {
+		case msg, ok := <-mch:
+			if !ok {
+				err = s.getNextMsgErr()
+			} else {
+				err = s.processNextMsgDelivered(msg)
+				if err == nil {
+					err = checkMsg(msg)
+				}
+				recvd++
+				msgs = append(msgs, msg)
+			}
+		case <-t.C:
+			err = ErrTimeout
+		}
 		if err != nil {
-			return err
+			break
+		}
+
+		if recvd == batch {
+			break
 		}
 	}
-	return nil
+
+	return msgs, err
 }
 
 func (js *js) getConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
@@ -976,7 +1018,7 @@ func (m *Msg) checkReply() (*js, bool, error) {
 		return nil, false, nil
 	}
 	js := sub.jsi.js
-	isPullMode := sub.jsi.pull > 0
+	isPullMode := sub.jsi.pull
 	sub.mu.Unlock()
 
 	return js, isPullMode, nil
