@@ -989,7 +989,11 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...PubOpt) error {
 		if ctx != nil {
 			_, err = nc.RequestWithContext(ctx, m.Reply, ackType)
 		} else {
-			_, err = nc.Request(m.Reply, ackType, wait)
+			var resp *Msg			
+			resp, err = nc.Request(m.Reply, ackType, wait)
+			if err == nil {
+				fmt.Println("RESPONSE:", resp)
+			}
 		}
 	} else {
 		err = nc.Publish(m.Reply, ackType)
