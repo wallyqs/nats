@@ -818,41 +818,6 @@ func MaxDeliver(n int) SubOpt {
 	})
 }
 
-func PlaybackInstant() SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.ReplayPolicy = ReplayInstant
-		return nil
-	})
-}
-
-func PlaybackOriginal() SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.ReplayPolicy = ReplayOriginal
-		return nil
-	})
-}
-
-func RateLimit(n uint64) SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.RateLimit = n
-		return nil
-	})
-}
-
-func SampleFrequency(s string) SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.SampleFrequency = s
-		return nil
-	})
-}
-
-func PullMaxWaiting(n int) SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.MaxWaiting = n
-		return nil
-	})
-}
-
 func MaxAckPending(n int) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.MaxAckPending = n
