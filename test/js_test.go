@@ -3499,23 +3499,7 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 	}
 
-	// checkForPending := func(t *testing.T, sub *nats.Subscription, expected int, deadline time.Duration) {
-	// 	t.Helper()
-	// 	var pending int
-	// 	timeout := time.Now().Add(deadline)
-	// 	for time.Now().Before(timeout) {
-	// 		pending, _, _ = sub.Pending()
-	// 		if pending == expected {
-	// 			break
-	// 		}
-	// 		time.Sleep(50 * time.Millisecond)
-	// 	}
-	// 	if pending != expected {
-	// 		t.Errorf("Expected: %v, got: %v", expected, pending)
-	// 	}
-	// }
-
-	t.Run("batch size", func(t *testing.T) {
+	t.Run("fetch batch", func(t *testing.T) {
 		sub, err := js.SubscribeSync(subject, nats.Durable("pd1"), nats.Pull())
 		if err != nil {
 			t.Fatal(err)

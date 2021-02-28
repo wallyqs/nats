@@ -830,7 +830,8 @@ func (opt pullOptFn) configurePull(opts *pullOpts) error {
 	return opt(opts)
 }
 
-func (sub *Subscription) Pull(opts ...PullOpt) error {
+func (sub *Subscription) Pull() error {
+	// TODO: Keep for now.
 	return nil
 }
 
@@ -849,16 +850,17 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	}
 
 	sub.mu.Lock()
-	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || sub.jsi.pull {
+	if sub.jsi == nil || sub.jsi.deliver != _EMPTY_ || !sub.jsi.pull {
 		sub.mu.Unlock()
 		return nil, ErrTypeSubscription
 	}
 
-	// FIXME: We don't need the original inbox from the subscriber anymore...
+	// FIXME: We don't need the original inbox from the subscriber anymore,
+	// maybe each consumer should have its own mux for responses?
 	nc, _ := sub.conn, sub.Subject
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	js := sub.jsi.js
-	mch := sub.mch
+	// mch := sub.mch
 
 	ttl := o.ttl
 	if ttl == 0 {
@@ -878,8 +880,8 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	// in case of errors, then dispatch the rest of the replies
 	// to the channel.
 	inbox := NewInbox()
-	ch := make(chan *Msg, batch)
 
+	ch := make(chan *Msg, batch)
 	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch, true, nil)
 	if err != nil {
 		return nil, err
@@ -896,7 +898,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	msg, err := s.NextMsg(ttl)
 	if err != nil {
 		// Unsubscribe and cleanup.
-		// fmt.Println("Internal Error: ", err)
+		fmt.Println("Internal Error: ", err)
 		s.Unsubscribe()
 		return nil, err
 	}
@@ -914,27 +916,28 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 
 	// No errors so send the first msg and the rest
 	// to the consumer channel.
-	go func() {
-		// TODO: Use a context that is the same as
-		// MaxWait to cancel altogether so that
-		// these pull requests do not linger.
-		defer s.Unsubscribe()
+	// go func() {
+	// 	// TODO: Use a context that is the same as
+	// 	// MaxWait to cancel altogether so that
+	// 	// these pull requests do not linger.
+	// 	defer s.Unsubscribe()
+	// 
+	// 	// Send the first message to the original consumer.
+	// 	mch <- msg
+	// 
+	// 	// TODO: Have a default cancellation based on MaxWait
+	// 	recvd := 1
+	// 	for recvd < batch {
+	// 		nextMsg, err := s.NextMsg(o.ttl)
+	// 		if err != nil {
+	// 			fmt.Println("Error on next msg:", err)
+	// 			continue
+	// 		}
+	// 		recvd++
+	// 		mch <- nextMsg
+	// 	}
+	// }()
 
-		// Send the first message to the original consumer.
-		mch <- msg
-
-		// TODO: Have a default cancellation based on MaxWait
-		recvd := 1
-		for recvd < batch {
-			nextMsg, err := s.NextMsg(o.ttl)
-			if err != nil {
-				fmt.Println("Error on next msg:", err)
-				continue
-			}
-			recvd++
-			mch <- nextMsg
-		}
-	}()
 	return nil, nil
 }
 
