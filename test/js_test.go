@@ -475,7 +475,11 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 
 	// The first batch if available should be delivered and queued up.
-	waitForPending(t, batch)
+	// waitForPending(t, batch)
+	bmsgs, err := sub.Fetch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if info, _ := sub.ConsumerInfo(); info.NumAckPending != batch || info.NumPending != uint64(batch) {
 		t.Fatalf("Expected %d pending ack, and %d still waiting to be delivered, got %d and %d", batch, batch, info.NumAckPending, info.NumPending)
@@ -483,20 +487,32 @@ func TestJetStreamSubscribe(t *testing.T) {
 
 	// Now go ahead and consume these and ack, but not ack+next.
 	for i := 0; i < batch; i++ {
-		m, err := sub.NextMsg(10 * time.Millisecond)
+		m := bmsgs[i]
+		err = m.Ack()
 		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
+			t.Fatal(err)
 		}
-		m.Respond(nats.AckAck)
 	}
 	if info, _ := sub.ConsumerInfo(); info.AckFloor.Consumer != uint64(batch) {
 		t.Fatalf("Expected ack floor to be %d, got %d", batch, info.AckFloor.Consumer)
 	}
-
-	// Now we are stuck so to speak. So we can unstick the sub by calling poll.
 	waitForPending(t, 0)
-	sub.Pull()
-	waitForPending(t, batch)
+
+	// Make a request for 10 but should only receive a few.
+	bmsgs, err = sub.Fetch(10, nats.MaxWait(2*time.Second))
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	got := len(bmsgs)
+	expected := 5
+	if got != expected {
+		t.Errorf("Expected: %v, got: %v", expected, got)
+	}
+
+	for _, msg := range bmsgs {
+		msg.Ack()
+	}
+
 	sub.Drain()
 
 	// Now test attaching to a pull based durable.
@@ -519,43 +535,24 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	waitForPending(t, batch)
+	// Fetch messages a couple of times.
+	expected = 5
+	bmsgs, err = sub.Fetch(expected, nats.MaxWait(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got = len(bmsgs)
+	if got != expected {
+		t.Errorf("Expected: %v, got: %v", expected, got)
+	}
 
 	info, err = sub.ConsumerInfo()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if info.NumAckPending != batch*2 || info.NumPending != uint64(toSend-batch) {
-		t.Fatalf("Expected ack pending of %d and pending to be %d, got %d %d", batch*2, toSend-batch, info.NumAckPending, info.NumPending)
-	}
-
-	// Create a new pull based consumer.
-	batch = 1
-	msgs := make(chan *nats.Msg, 100)
-	sub, err = js.ChanSubscribe("baz", msgs, nats.Durable("dlc"), nats.Pull())
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-
-	// Since this sub is on 'baz' no messages are waiting for us to start.
-	waitForPending(t, 0)
-
-	// Now send in 10 messages to baz.
-	for i := 0; i < toSend; i++ {
-		js.Publish("baz", msg)
-	}
-	// We should get 1 queued up.
-	waitForPending(t, batch)
-
-	for received := 0; received < toSend; {
-		select {
-		case m := <-msgs:
-			received++
-			// This will do the AckNext version since it knows we are pull based.
-			m.Ack()
-		case <-time.After(time.Second):
-			t.Fatalf("Timeout waiting for messages")
-		}
+	if info.NumAckPending != batch || info.NumPending != uint64(toSend-batch) {
+		t.Fatalf("Expected ack pending of %d and pending to be %d, got %d %d", batch, toSend-batch, info.NumAckPending, info.NumPending)
 	}
 
 	// Prevent invalid durable names
@@ -2462,10 +2459,11 @@ func TestJetStream_Unsubscribe(t *testing.T) {
 		}
 		fetchConsumers(t, 1)
 
-		msg, err := subC.NextMsg(2 * time.Second)
+		msgs, err := subC.Fetch(1, nats.MaxWait(2*time.Second))
 		if err != nil {
 			t.Errorf("Unexpected error getting message: %v", err)
 		}
+		msg := msgs[0]
 		got := string(msg.Data)
 		expected := "C"
 		if got != expected {
@@ -3381,17 +3379,9 @@ NextMsg:
 		default:
 		}
 
-		pending, _, _ := sub.Pending()
-		if pending == 0 {
-			err = sub.Pull()
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-		}
-
 		// Server will shutdown after a couple of messages which will result
 		// in empty messages with an status unavailable error.
-		msg, err := sub.NextMsg(2 * time.Second)
+		msgs, err := sub.Fetch(1, nats.MaxWait(2*time.Second))
 		if err == nats.ErrNoResponders || err == nats.ErrTimeout {
 			// Backoff before asking for more messages.
 			time.Sleep(100 * time.Millisecond)
@@ -3401,6 +3391,7 @@ NextMsg:
 			continue NextMsg
 		}
 
+		msg := msgs[0]
 		if len(msg.Data) == 0 && msg.Header.Get("Status") == "503" {
 			t.Fatal("Got 503 JetStream API message!")
 		}
@@ -3780,16 +3771,9 @@ NextMsg:
 		}
 
 		for qsub, sub := range subs {
-			if pending, _, _ := sub.Pending(); pending == 0 {
-				err = sub.Pull()
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
-			}
-
 			// Server will shutdown after a couple of messages which will result
 			// in empty messages with an status unavailable error.
-			msg, err := sub.NextMsg(2 * time.Second)
+			msgs, err := sub.Fetch(1, nats.MaxWait(2 * time.Second))
 			if err == nats.ErrNoResponders || err == nats.ErrTimeout {
 				// Backoff before asking for more messages.
 				time.Sleep(100 * time.Millisecond)
@@ -3798,6 +3782,7 @@ NextMsg:
 				t.Errorf("Unexpected error: %v", err)
 				continue NextMsg
 			}
+			msg := msgs[0]
 			recvd[string(msg.Data)]++
 			recvdQ[qsub] = append(recvdQ[qsub], msg)
 
@@ -3869,9 +3854,7 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		t.Fatal(err)
 	}
 
-	totalMsgs := 10
 	subject := "WQ"
-
 	_, err = js.AddStream(&nats.StreamConfig{
 		Name:     subject,
 		Replicas: 1,
@@ -3890,27 +3873,30 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			}
 		}
 	}
-	sendMsgs(t, totalMsgs)
 
 	t.Run("batch size", func(t *testing.T) {
-		sub, err := js.SubscribeSync(subject, nats.Durable("batch"), nats.Pull())
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+		sub, err := js.SubscribeSync(subject, nats.Durable("batch-size"), nats.Pull())
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer sub.Unsubscribe()
 
-		msgs, err := sub.Fetch(10, nats.MaxWait(2*time.Second))
+		msgs, err := sub.Fetch(expected, nats.MaxWait(2*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		got := len(msgs)
-		if got != totalMsgs {
-			t.Fatalf("Got %v messages, expected at least: %v", got, totalMsgs)
+		if got != expected {
+			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
 		}
 
 		for _, msg := range msgs {
-			msg.Ack()
+			msg.AckSync()
 		}
 
 		// Next fetch will timeout since no more messages.
@@ -3919,15 +3905,15 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			t.Errorf("Expected timeout fetching next message, got: %v", err)
 		}
 
-		expected := 5
+		expected = 5
 		sendMsgs(t, expected)
 		msgs, err = sub.Fetch(expected, nats.MaxWait(1*time.Second))
 		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
+			t.Fatalf("Unexpected error: %v", err)
 		}
 		got = len(msgs)
 		if got != expected {
-			t.Fatalf("Got %v messages, expected at least: %v", got, totalMsgs)
+			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
 		}
 
 		for _, msg := range msgs {
@@ -3935,8 +3921,37 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 	})
 
+	t.Run("fetch after unsubscribe", func(t *testing.T) {
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+		sub, err := js.SubscribeSync(subject, nats.Durable("fetch-unsub"), nats.Pull())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = sub.Unsubscribe()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = sub.Fetch(1, nats.MaxWait(500*time.Millisecond))
+		if err == nil {
+			t.Fatal("Unexpected success")
+		}
+		if err != nil && (err != nats.ErrTimeout && err != nats.ErrNoResponders) {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+	})
+
 	t.Run("max waiting timeout", func(t *testing.T) {
-		sub, err := js.SubscribeSync(subject, nats.Durable("pdt"), nats.Pull())
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+
+		sub, err := js.SubscribeSync(subject, nats.Durable("max-waiting"), nats.Pull())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3944,15 +3959,21 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 
 		// Poll more than the default max of waiting/inflight pull requests,
 		// so that We will get only 408 timeout errors.
-		errCh := make(chan error, 1)
+		errCh := make(chan error, 1024)
+		defer close(errCh)
+		var wg sync.WaitGroup
 		for i := 0; i < 1024; i++ {
+			wg.Add(1)
+
 			go func() {
-				_, err = sub.Fetch(1, nats.MaxWait(2*time.Second))
+				_, err = sub.Fetch(1, nats.MaxWait(500*time.Millisecond))
+				defer wg.Done()
 				if err != nil {
 					errCh <- err
 				}
 			}()
 		}
+		wg.Wait()
 
 		select {
 		case <-time.After(1 * time.Second):
@@ -3964,7 +3985,50 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 	})
 
+	t.Run("expires in", func(t *testing.T) {
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+		sub, err := js.SubscribeSync(subject, nats.Durable("expires"), nats.Pull(), nats.PullMaxWaiting(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Unsubscribe()
+
+		// Fetch all messages
+		msgs, err := sub.Fetch(expected, nats.PullExpiresIn(5*time.Second), nats.MaxWait(2*time.Second))
+		if err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
+		got := len(msgs)
+		if got != expected {
+			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
+		}
+
+		// Pull a few times in parallel which will make the queue full.
+		for i := 0; i < 10; i++ {
+			go sub.Fetch(1, nats.PullExpiresIn(1*time.Nanosecond), nats.MaxWait(2*time.Second))
+		}
+
+		msgs, err = sub.Fetch(1, nats.PullExpiresIn(1*time.Nanosecond), nats.MaxWait(2*time.Second))
+		if err == nil {
+			t.Error("Unexpected success")
+		}
+		got = len(msgs)
+		if got > 0 {
+			t.Errorf("Expected no messages, got: %v", got)
+		}
+		if err != nil && err.Error() != `Request Timeout` {
+			t.Errorf("Expected request timeout fetching next message, got: %+v", err)
+		}
+	})
+
 	t.Run("no wait", func(t *testing.T) {
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
 		sub, err := js.SubscribeSync(subject, nats.Durable("no-wait"), nats.Pull())
 		if err != nil {
 			t.Fatal(err)
@@ -3996,19 +4060,19 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 				}
 			}
 
-			if len(recvd) == totalMsgs {
+			if len(recvd) == expected {
 				done()
 				break
 			}
 		}
 
 		got := len(recvd)
-		if got != totalMsgs {
-			t.Fatalf("Got %v messages, expected at least: %v", got, totalMsgs)
+		if got != expected {
+			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
 		}
 
 		// There should only be 404 errors since no more messages.
-		msgs, err := sub.Fetch(10, nats.PullNoWait(), nats.MaxWait(2*time.Second))
+		msgs, err := sub.Fetch(expected, nats.PullNoWait(), nats.MaxWait(2*time.Second))
 		if err == nil {
 			t.Fatal("Unexpected success", len(msgs))
 		}
