@@ -813,9 +813,10 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 }
 
 type pullOpts struct {
-	noWait bool
-	ttl    time.Duration
-	ctx    context.Context
+	noWait  bool
+	ttl     time.Duration
+	ctx     context.Context
+	expires time.Duration
 }
 
 type PullOpt interface {
@@ -829,7 +830,8 @@ func (opt pullOptFn) configurePull(opts *pullOpts) error {
 	return opt(opts)
 }
 
-// PullNoWait defines whether to disable waiting when making a pull request.
+// PullNoWait enables receiving a no messages error from the server
+// in case there are no new messages when making a pull request.
 func PullNoWait() PullOpt {
 	return pullOptFn(func(opts *pullOpts) error {
 		opts.noWait = true
@@ -840,7 +842,15 @@ func PullNoWait() PullOpt {
 // PullExpiresIn defines when to let the server expire an inflight pull request.
 func PullExpiresIn(duration time.Duration) PullOpt {
 	return pullOptFn(func(opts *pullOpts) error {
-		opts.ttl = duration
+		opts.expires = duration
+		return nil
+	})
+}
+
+// PullMaxWaiting defines the max inflight pull requests to be delivered more messages.
+func PullMaxWaiting(n int) SubOpt {
+	return subOptFn(func(opts *subOpts) error {
+		opts.cfg.MaxWaiting = n
 		return nil
 	})
 }
@@ -852,6 +862,10 @@ func (sub *Subscription) Pull() error {
 
 // Fetch pulls a batch of messages from a stream for a pull consumer.
 func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
+	if sub == nil {
+		return nil, ErrBadSubscription
+	}
+
 	var o pullOpts
 	for _, opt := range opts {
 		if err := opt.configurePull(&o); err != nil {
@@ -882,11 +896,17 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	}
 	sub.mu.Unlock()
 
-	// PullNoWait will return 404 right away if there are no more messages.
+	// PullNoWait when enabled returns:
+	// - 404 right away if there are no more messages,
+	// - 409 in case it reached MaxAckPending.
+	//
 	// PullExpiresIn will give a duration to the server to expire our pull request
 	// to this inbox only and will serve the newest one.
-	// Default is to let the Pull linger until there are 512 waiting requests.
-	nr := &nextRequest{Batch: batch, NoWait: o.noWait}
+	//
+	// Default is to let the pull requests linger until there are 512 waiting requests,
+	// this limit can be modified by using PullMaxWaiting when creating the consumer.
+	//
+	nr := &nextRequest{Batch: batch, NoWait: o.noWait, Expires: o.expires}
 	req, _ := json.Marshal(nr)
 	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
 
@@ -907,18 +927,8 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 		return nil, err
 	}
 
-	// We should be getting the response from the server,
-	// in case we got a poll error then stop and cleanup.
 	t := globalTimerPool.Get(ttl)
 	defer globalTimerPool.Put(t)
-
-	// msg, err := s.NextMsg(ttl)
-	// if err != nil {
-	// 	// Unsubscribe and cleanup.
-	// 	fmt.Println("Internal Error: ", err)
-	// 	s.Unsubscribe()
-	// 	return nil, err
-	// }
 
 	// Check for empty payload message and process synchronously
 	// any status messages.
@@ -947,10 +957,23 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 		}
 		msgs = append(msgs, msg)
 	case <-t.C:
-		return nil, ErrTimeout
+		err = ErrTimeout
 	}
+
+	// We should be getting the response from the server,
+	// in case we got a poll error then stop and cleanup.
 	if err != nil {
+		// Remove interest in the subscription so that the
+		// this inbox does not get delivered the results
+		// intended for another request.
+		s.Unsubscribe()
+		nc.Flush()
 		return nil, err
+	}
+
+	// If only one message expected from batch then already done.
+	if batch == 1 {
+		return msgs, nil
 	}
 
 	recvd := 1
@@ -974,6 +997,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 			break
 		}
 
+		// Check if enough messages already.
 		if recvd == batch {
 			break
 		}
