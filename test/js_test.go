@@ -627,15 +627,22 @@ func TestJetStreamAckPending_Pull(t *testing.T) {
 
 	// 3 messages delivered 5 times.
 	expected := 15
-	timeout := time.Now().Add(2 * time.Second)
 	pending := 0
+	msgs := make([]*nats.Msg, 0)
+	timeout := time.Now().Add(2 * time.Second)
 	for time.Now().Before(timeout) {
-		if pending, _, _ = sub.Pending(); pending >= expected {
+		ms, err := sub.Fetch(expected)
+		if err != nil || (ms != nil && len(ms) == 0) {
+			continue
+		}
+
+		msgs = append(msgs, ms...)
+		if len(msgs) >= expected {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if pending < expected {
+	if len(msgs) < expected {
 		t.Errorf("Expected %v, got %v", expected, pending)
 	}
 
@@ -681,27 +688,14 @@ func TestJetStreamAckPending_Pull(t *testing.T) {
 	}
 
 	acks := map[int]int{}
-
 	ackPending := 3
-	timeout = time.Now().Add(2 * time.Second)
-	for time.Now().Before(timeout) {
+	for _, m := range msgs {
 		info, err := sub.ConsumerInfo()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got, want := info.NumAckPending, ackPending; got > 0 && got != want {
 			t.Fatalf("unexpected num ack pending: got=%d, want=%d", got, want)
-		}
-
-		// Continue to ack all messages until no more pending.
-		pending, _, _ = sub.Pending()
-		if pending == 0 {
-			break
-		}
-
-		m, err := sub.NextMsg(100 * time.Millisecond)
-		if err != nil {
-			t.Fatalf("Error getting next message: %v", err)
 		}
 
 		if err := m.AckSync(); err != nil {
@@ -735,7 +729,7 @@ func TestJetStreamAckPending_Pull(t *testing.T) {
 		}
 	}
 
-	_, err = sub.NextMsg(100 * time.Millisecond)
+	_, err = sub.Fetch(1, nats.MaxWait(100*time.Millisecond))
 	if err != nats.ErrTimeout {
 		t.Errorf("Expected timeout, got: %v", err)
 	}
@@ -3773,7 +3767,7 @@ NextMsg:
 		for qsub, sub := range subs {
 			// Server will shutdown after a couple of messages which will result
 			// in empty messages with an status unavailable error.
-			msgs, err := sub.Fetch(1, nats.MaxWait(2 * time.Second))
+			msgs, err := sub.Fetch(1, nats.MaxWait(2*time.Second))
 			if err == nats.ErrNoResponders || err == nats.ErrTimeout {
 				// Backoff before asking for more messages.
 				time.Sleep(100 * time.Millisecond)

@@ -882,11 +882,6 @@ func PullMaxWaiting(n int) SubOpt {
 	})
 }
 
-func (sub *Subscription) Pull() error {
-	// TODO: Keep for now.
-	return nil
-}
-
 // Fetch pulls a batch of messages from a stream for a pull consumer.
 func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	if sub == nil {
@@ -1087,7 +1082,7 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...PubOpt) error {
 			return err
 		}
 	}
-	js, isPullMode, err := m.checkReply()
+	js, _, err := m.checkReply()
 	if err != nil {
 		return err
 	}
@@ -1109,24 +1104,11 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...PubOpt) error {
 		wait = js.wait
 	}
 
-	if isPullMode {
-		if bytes.Equal(ackType, AckAck) {
-			// err = nc.PublishRequest(m.Reply, m.Sub.Subject, AckNext)
-		} else if bytes.Equal(ackType, AckNak) || bytes.Equal(ackType, AckTerm) {
-			err = nc.PublishRequest(m.Reply, m.Sub.Subject, []byte("+NXT {\"batch\":1}"))
-		}
-		if sync && err == nil {
-			if ctx != nil {
-				_, err = nc.RequestWithContext(ctx, m.Reply, nil)
-			} else {
-				_, err = nc.Request(m.Reply, nil, wait)
-			}
-		}
-	} else if sync {
+	if sync {
 		if ctx != nil {
-			_, err = nc.RequestWithContext(ctx, m.Reply, ackType)
+			_, err = nc.RequestWithContext(ctx, m.Reply, nil)
 		} else {
-			_, err = nc.Request(m.Reply, ackType, wait)
+			_, err = nc.Request(m.Reply, nil, wait)
 		}
 	} else {
 		err = nc.Publish(m.Reply, ackType)
