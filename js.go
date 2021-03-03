@@ -543,9 +543,13 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		}
 	} else {
 		// Find the stream mapped to the subject.
-		stream, err = js.lookupStreamBySubject(subj)
-		if err != nil {
-			return nil, err
+		if o.stream == _EMPTY_ {
+			stream, err = js.lookupStreamBySubject(subj)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			stream = o.stream
 		}
 
 		// With an explicit durable name, then can lookup
@@ -581,8 +585,12 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 			if !isPullMode {
 				cfg.DeliverSubject = deliver
 			}
-			// Do filtering always, server will clear as needed.
-			cfg.FilterSubject = subj
+
+			// FIXME: Skip using filter subject for mirror streams
+			// as it can form cycles right now.
+			if o.stream == _EMPTY_ {
+				cfg.FilterSubject = subj
+			}
 		}
 	}
 
@@ -821,6 +829,13 @@ func MaxDeliver(n int) SubOpt {
 func MaxAckPending(n int) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.MaxAckPending = n
+		return nil
+	})
+}
+
+func Stream(stream string) SubOpt {
+	return subOptFn(func(opts *subOpts) error {
+		opts.stream = stream
 		return nil
 	})
 }

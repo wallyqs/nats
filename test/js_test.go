@@ -3028,6 +3028,7 @@ func testJetStreamMirror_Source(t *testing.T, nodes ...*jsServer) {
 		t.Fatal(err)
 	}
 
+	streamSubject := "hello"
 	_, err = js.AddStream(&nats.StreamConfig{
 		Name: "origin",
 		Placement: &nats.Placement{
@@ -3035,6 +3036,7 @@ func testJetStreamMirror_Source(t *testing.T, nodes ...*jsServer) {
 		},
 		Storage:  nats.MemoryStorage,
 		Replicas: 1,
+		Subjects: []string{streamSubject},
 	})
 	if err != nil {
 		t.Fatalf("Unexpected error creating stream: %v", err)
@@ -3043,7 +3045,7 @@ func testJetStreamMirror_Source(t *testing.T, nodes ...*jsServer) {
 	totalMsgs := 10
 	for i := 0; i < totalMsgs; i++ {
 		payload := fmt.Sprintf("i:%d", i)
-		js.Publish("origin", []byte(payload))
+		js.Publish(streamSubject, []byte(payload))
 	}
 
 	t.Run("create mirrors", func(t *testing.T) {
@@ -3118,6 +3120,17 @@ func testJetStreamMirror_Source(t *testing.T, nodes ...*jsServer) {
 		if got < totalMsgs {
 			t.Errorf("Expected %v, got: %v", totalMsgs, got)
 		}
+
+		// Read messages from mirror stream
+		sub, err := js.SubscribeSync("origin", nats.Stream("m1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := sub.NextMsg(2 * time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Received: %+v", msg)
 	})
 
 	t.Run("get mirror info", func(t *testing.T) {
