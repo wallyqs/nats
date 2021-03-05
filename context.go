@@ -110,6 +110,33 @@ func (nc *Conn) oldRequestWithContext(ctx context.Context, subj string, hdr, dat
 	return s.NextMsgWithContext(ctx)
 }
 
+func (s *Subscription) processControlFlowCtx(ctx context.Context, mch <-chan *Msg) (*Msg, error) {
+	// We will peek at the channel and return the next message
+	// that is not a control message or a timeout error.
+	var msg *Msg
+	var ok bool
+	for {
+		select {
+		case msg, ok = <-mch:
+			if !ok {
+				return nil, s.getNextMsgErr()
+			}
+			if err := s.processNextMsgDelivered(msg); err != nil {
+				return nil, err
+			}
+			isControl, err := s.handleControlMessage(msg)
+			if err != nil {
+				return nil, err
+			}
+			if !isControl {
+				return msg, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
 // NextMsgWithContext takes a context and returns the next message
 // available to a synchronous subscriber, blocking until it is delivered
 // or context gets canceled.
@@ -133,6 +160,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 
 	// snapshot
 	mch := s.mch
+	jsi := s.jsi
 	s.mu.Unlock()
 
 	var ok bool
@@ -147,9 +175,32 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 		if err := s.processNextMsgDelivered(msg); err != nil {
 			return nil, err
 		} else {
+			// JetStream Push consumers may get extra status messages
+			// that the client will process automatically.
+			if jsi != nil {
+				isControl, err := s.handleControlMessage(msg)
+				if err != nil {
+					return nil, err
+				}
+				if isControl {
+					// Check for following messages using a timer.
+					break
+				}
+				return msg, nil
+			}
 			return msg, nil
 		}
 	default:
+	}
+
+	if jsi != nil {
+		// Skip any control messages that may have been delivered
+		// until there is a valid message or a timeout error.
+		msg, err = s.processControlFlowCtx(ctx, mch)
+		if err != nil {
+			return nil, err
+		}
+		return msg, nil
 	}
 
 	select {

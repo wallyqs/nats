@@ -2378,6 +2378,7 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 			s.delivered++
 			delivered = s.delivered
 		}
+		jsi := s.jsi
 		s.mu.Unlock()
 
 		if closed {
@@ -2386,7 +2387,15 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 
 		// Deliver the message.
 		if m != nil && (max == 0 || delivered <= max) {
-			mcb(m)
+			if jsi != nil {
+				// Process and skip flow control messages automatically.
+				isControl, _ := s.handleControlMessage(m)
+				if !isControl {
+					mcb(m)
+				}
+			} else {
+				mcb(m)
+			}
 		}
 		// If we have hit the max for delivered msgs, remove sub.
 		if max > 0 && delivered >= max {
@@ -2831,6 +2840,7 @@ const (
 	descrHdr     = "Description"
 	noResponders = "503"
 	noMessages   = "404"
+	controlMsg   = "100"
 	statusLen    = 3 // e.g. 20x, 40x, 50x
 )
 
@@ -3620,6 +3630,51 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 	return nil
 }
 
+func (s *Subscription) handleControlMessage(msg *Msg) (bool, error) {
+	isControl := len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
+	if !isControl {
+		return isControl, nil
+	}
+
+	// If it is a flow control message then have to ack.
+	if msg.Reply != "" {
+		err := msg.Respond(nil)
+		if err != nil {
+			return isControl, err
+		}
+	}
+	return isControl, nil
+}
+
+// processControlFlow checks whether it is a control message and
+// handles it automatically.
+func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg) (*Msg, error) {
+	// We will peek at the channel and return the next message
+	// that is not a control message or a timeout error.
+	var msg *Msg
+	var ok bool
+	for {
+		select {
+		case msg, ok = <-mch:
+			if !ok {
+				return nil, s.getNextMsgErr()
+			}
+			if err := s.processNextMsgDelivered(msg); err != nil {
+				return nil, err
+			}
+			isControl, err := s.handleControlMessage(msg)
+			if err != nil {
+				return nil, err
+			}
+			if !isControl {
+				return msg, nil
+			}
+		case <-t.C:
+			return nil, ErrTimeout
+		}
+	}
+}
+
 // NextMsg will return the next message available to a synchronous subscriber
 // or block until one is available. An error is returned if the subscription is invalid (ErrBadSubscription),
 // the connection is closed (ErrConnectionClosed), or the timeout is reached (ErrTimeout).
@@ -3637,6 +3692,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 
 	// snapshot
 	mch := s.mch
+	jsi := s.jsi
 	s.mu.Unlock()
 
 	var ok bool
@@ -3651,6 +3707,18 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 		if err := s.processNextMsgDelivered(msg); err != nil {
 			return nil, err
 		} else {
+			// JetStream Push consumers may get extra status messages
+			// that the client will process automatically.
+			if jsi != nil {
+				isControl, err := s.handleControlMessage(msg)
+				if err != nil {
+					return nil, err
+				}
+				if isControl {
+					// Check for following messages using a timer.
+					break
+				}
+			}
 			return msg, nil
 		}
 	default:
@@ -3661,6 +3729,16 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 
 	t := globalTimerPool.Get(timeout)
 	defer globalTimerPool.Put(t)
+
+	if jsi != nil {
+		// Skip any control messages that may have been delivered
+		// until there is a valid message or a timeout error.
+		msg, err = s.processControlFlow(t, mch)
+		if err != nil {
+			return nil, err
+		}
+		return msg, nil
+	}
 
 	select {
 	case msg, ok = <-mch:
