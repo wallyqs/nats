@@ -2447,6 +2447,8 @@ func (nc *Conn) processMsg(data []byte) {
 	// Check if we have headers encoded here.
 	var h http.Header
 	var err error
+	var ctrl bool
+	var hasFC bool
 
 	if nc.ps.ma.hdr > 0 {
 		hbuf := msgPayload[:nc.ps.ma.hdr]
@@ -2467,6 +2469,13 @@ func (nc *Conn) processMsg(data []byte) {
 	m := &Msg{Header: h, Data: msgPayload, Subject: subj, Reply: reply, Sub: sub}
 
 	sub.mu.Lock()
+
+	// Skip flow control messages in case of using a JetStream context.
+	jsi := sub.jsi
+	if jsi != nil {
+		hasFC = jsi.fch != nil
+		ctrl = isControlMessage(m)
+	}
 
 	// Check if closed.
 	if sub.closed {
@@ -2494,23 +2503,36 @@ func (nc *Conn) processMsg(data []byte) {
 
 	// We have two modes of delivery. One is the channel, used by channel
 	// subscribers and syncSubscribers, the other is a linked list for async.
-	if sub.mch != nil {
-		select {
-		case sub.mch <- m:
-		default:
-			goto slowConsumer
-		}
-	} else {
-		// Push onto the async pList
-		if sub.pHead == nil {
-			sub.pHead = m
-			sub.pTail = m
-			if sub.pCond != nil {
-				sub.pCond.Signal()
+	if !ctrl {
+		if sub.mch != nil {
+			select {
+			case sub.mch <- m:
+			default:
+				goto slowConsumer
 			}
 		} else {
-			sub.pTail.next = m
-			sub.pTail = m
+			// Push onto the async pList
+			if sub.pHead == nil {
+				sub.pHead = m
+				sub.pTail = m
+				if sub.pCond != nil {
+					sub.pCond.Signal()
+				}
+			} else {
+				sub.pTail.next = m
+				sub.pTail = m
+			}
+		}
+		if hasFC {
+			jsi.trackSequences(m)
+		}
+	} else if hasFC {
+		// Process flow control and heartbeat messages
+		// automatically for JetStream Push consumers.
+		select {
+		case jsi.fch <- m:
+		default:
+			goto slowConsumer
 		}
 	}
 
@@ -2518,6 +2540,7 @@ func (nc *Conn) processMsg(data []byte) {
 	sub.sc = false
 
 	sub.mu.Unlock()
+
 	return
 
 slowConsumer:
@@ -2826,14 +2849,17 @@ func NewMsg(subject string) *Msg {
 }
 
 const (
-	hdrLine      = "NATS/1.0\r\n"
-	crlf         = "\r\n"
-	hdrPreEnd    = len(hdrLine) - len(crlf)
-	statusHdr    = "Status"
-	descrHdr     = "Description"
-	noResponders = "503"
-	noMessages   = "404"
-	statusLen    = 3 // e.g. 20x, 40x, 50x
+	hdrLine            = "NATS/1.0\r\n"
+	crlf               = "\r\n"
+	hdrPreEnd          = len(hdrLine) - len(crlf)
+	statusHdr          = "Status"
+	descrHdr           = "Description"
+	lastConsumerSeqHdr = "Nats-Last-Consumer"
+	lastStreamSeqHdr   = "Nats-Last-Stream"
+	noResponders       = "503"
+	noMessages         = "404"
+	controlMsg         = "100"
+	statusLen          = 3 // e.g. 20x, 40x, 50x
 )
 
 // decodeHeadersMsg will decode and headers.
@@ -3574,9 +3600,17 @@ func (s *Subscription) AutoUnsubscribe(max int) error {
 // unsubscribe performs the low level unsubscribe to the server.
 // Use Subscription.Unsubscribe()
 func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
-	// Check whether it is a JetStream sub and should clean up consumers.
+	// For JetStream consumers, need to clean up ephemeral consumers
+	// or delete durable ones if called with Unsubscribe. In case they
+	// are push based with flow control, need to also close the channel
+	// for handling control messages.
 	sub.mu.Lock()
 	jsi := sub.jsi
+	if jsi != nil && jsi.fch != nil {
+		// Close channel to signal flow control goroutine to stop.
+		close(jsi.fch)
+		jsi.fch = nil
+	}
 	sub.mu.Unlock()
 	if jsi != nil {
 		err := jsi.unsubscribe(drainMode)
@@ -3620,6 +3654,59 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 		fmt.Fprintf(nc.bw, unsubProto, s.sid, maxStr)
 	}
 	return nil
+}
+
+// ErrConsumerSequenceMismatch represents an error from a consumer
+// that received a Heartbeat including sequence different to the
+// one expected from the view of the client.
+type ErrConsumerSequenceMismatch struct {
+	// StreamResumeSequence is the stream sequence from where the consumer
+	// should resume consuming from the stream.
+	StreamResumeSequence uint64
+
+	// ConsumerSequence is the sequence of the consumer that is behind.
+	ConsumerSequence int64
+
+	// LastConsumerSequence is the sequence of the consumer when the heartbeat
+	// was received.
+	LastConsumerSequence int64
+}
+
+func (ecs *ErrConsumerSequenceMismatch) Error() string {
+	return fmt.Sprintf("nats: sequence mismatch for consumer at sequence %d (%d sequences behind), should restart consumer from stream sequence %d",
+		ecs.ConsumerSequence,
+		ecs.LastConsumerSequence-ecs.ConsumerSequence,
+		ecs.StreamResumeSequence,
+	)
+}
+
+// handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
+func handleConsumerSequenceMismatch(sub *Subscription, err error) {
+	sub.mu.Lock()
+	nc := sub.conn
+	sub.mu.Unlock()
+
+	nc.mu.Lock()
+	errCB := nc.Opts.AsyncErrorCB
+	if errCB != nil {
+		nc.ach.push(func() { errCB(nc, sub, err) })
+	}
+	nc.mu.Unlock()
+}
+
+func isControlMessage(msg *Msg) bool {
+	return len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
+}
+
+func (jsi *jsSub) trackSequences(msg *Msg) {
+	var ctrl *controlMetadata
+	if cmeta := jsi.cmeta.Load(); cmeta == nil {
+		ctrl = &controlMetadata{}
+	} else {
+		ctrl = cmeta.(*controlMetadata)
+	}
+	ctrl.meta = msg.Reply
+	jsi.cmeta.Store(ctrl)
 }
 
 // NextMsg will return the next message available to a synchronous subscriber
