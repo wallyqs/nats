@@ -415,6 +415,8 @@ type ConsumerConfig struct {
 	SampleFrequency string        `json:"sample_freq,omitempty"`
 	MaxWaiting      int           `json:"max_waiting,omitempty"`
 	MaxAckPending   int           `json:"max_ack_pending,omitempty"`
+	FlowControl     bool          `json:"flow_control,omitempty"`
+	Heartbeat       time.Duration `json:"idle_heartbeat,omitempty"`
 }
 
 // ConsumerInfo is the info from a JetStream consumer.
@@ -868,6 +870,22 @@ func RateLimit(n uint64) SubOpt {
 func BindStream(name string) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.stream = name
+		return nil
+	})
+}
+
+// EnableFlowControl enables flow control for a push based consumer.
+func EnableFlowControl() SubOpt {
+	return subOptFn(func(opts *subOpts) error {
+		opts.cfg.FlowControl = true
+		return nil
+	})
+}
+
+// IdleHeartbeat enables push based consumers to have idle heartbeats delivered.
+func IdleHeartbeat(duration time.Duration) SubOpt {
+	return subOptFn(func(opts *subOpts) error {
+		opts.cfg.Heartbeat = duration
 		return nil
 	})
 }
