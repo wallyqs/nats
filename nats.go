@@ -124,6 +124,7 @@ var (
 	ErrHeadersNotSupported          = errors.New("nats: headers not supported by this server")
 	ErrBadHeaderMsg                 = errors.New("nats: message could not decode headers")
 	ErrNoResponders                 = errors.New("nats: no responders available for request")
+	ErrNoMessages                   = errors.New("nats: no more messages")
 	ErrNoContextOrTimeout           = errors.New("nats: no context or timeout given")
 	ErrDirectModeRequired           = errors.New("nats: direct access requires direct pull or push")
 	ErrPullModeNotAllowed           = errors.New("nats: pull based not supported")

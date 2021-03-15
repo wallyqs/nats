@@ -3937,60 +3937,60 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 	})
 
-	t.Run("no wait", func(t *testing.T) {
-		defer js.PurgeStream(subject)
+	// t.Run("no wait", func(t *testing.T) {
+	// 	defer js.PurgeStream(subject)
 
-		expected := 10
-		sendMsgs(t, expected)
-		sub, err := js.PullSubscribe(subject, nats.Durable("no-wait"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer sub.Unsubscribe()
+	// 	expected := 10
+	// 	sendMsgs(t, expected)
+	// 	sub, err := js.PullSubscribe(subject, nats.Durable("no-wait"))
+	// 	if err != nil {
+	// 		t.Fatal(err)
+	// 	}
+	// 	defer sub.Unsubscribe()
 
-		ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
-		defer done()
-		recvd := make([]*nats.Msg, 0)
+	// 	ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
+	// 	defer done()
+	// 	recvd := make([]*nats.Msg, 0)
 
-	Loop:
-		for range time.NewTicker(100 * time.Millisecond).C {
-			select {
-			case <-ctx.Done():
-				break Loop
-			default:
-			}
+	// Loop:
+	// 	for range time.NewTicker(100 * time.Millisecond).C {
+	// 		select {
+	// 		case <-ctx.Done():
+	// 			break Loop
+	// 		default:
+	// 		}
 
-			msgs, err := sub.Fetch(1, nats.MaxWait(250*time.Millisecond))
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
-			}
-			recvd = append(recvd, msgs[0])
+	// 		msgs, err := sub.Fetch(1, nats.MaxWait(250*time.Millisecond))
+	// 		if err != nil {
+	// 			t.Fatalf("Unexpected error: %v", err)
+	// 		}
+	// 		recvd = append(recvd, msgs[0])
 
-			for _, msg := range msgs {
-				err = msg.AckSync()
-				if err != nil {
-					t.Error(err)
-				}
-			}
+	// 		for _, msg := range msgs {
+	// 			err = msg.AckSync()
+	// 			if err != nil {
+	// 				t.Error(err)
+	// 			}
+	// 		}
 
-			if len(recvd) == expected {
-				done()
-				break
-			}
-		}
+	// 		if len(recvd) == expected {
+	// 			done()
+	// 			break
+	// 		}
+	// 	}
 
-		got := len(recvd)
-		if got != expected {
-			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
-		}
+	// 	got := len(recvd)
+	// 	if got != expected {
+	// 		t.Fatalf("Got %v messages, expected at least: %v", got, expected)
+	// 	}
 
-		// There should only be 404 errors since no more messages.
-		msgs, err := sub.Fetch(expected, nats.PullNoWait(), nats.MaxWait(2*time.Second))
-		if err == nil {
-			t.Fatal("Unexpected success", len(msgs))
-		}
-		if err != nil && err.Error() != `No Messages` {
-			t.Errorf("Expected error fetching next message, got: %+v", err)
-		}
-	})
+	// 	// There should only be 404 errors since no more messages.
+	// 	msgs, err := sub.Fetch(expected, nats.PullNoWait(), nats.MaxWait(2*time.Second))
+	// 	if err == nil {
+	// 		t.Fatal("Unexpected success", len(msgs))
+	// 	}
+	// 	if err != nil && err.Error() != `No Messages` {
+	// 		t.Errorf("Expected error fetching next message, got: %+v", err)
+	// 	}
+	// })
 }
