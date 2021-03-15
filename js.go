@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -864,21 +865,37 @@ func (opt pullOptFn) configurePull(opts *pullOpts) error {
 	return opt(opts)
 }
 
-// PullNoWait enables receiving a no messages error from the server
-// in case there are no new messages when making a pull request.
-func PullNoWait() PullOpt {
-	return pullOptFn(func(opts *pullOpts) error {
-		opts.noWait = true
-		return nil
-	})
-}
-
 // PullMaxWaiting defines the max inflight pull requests to be delivered more messages.
 func PullMaxWaiting(n int) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.MaxWaiting = n
 		return nil
 	})
+}
+
+type MessageBatch struct {
+	// C is a receive only channel for the messages
+	// that is fed asynchronously.
+	C   <-chan *Msg
+	err error
+	sync.Mutex
+}
+
+func (bm *MessageBatch) Messages() []*Msg {
+	msgs := make([]*Msg, 0, cap(bm.C))
+
+	// When called, does the async waiting for all the messages.
+	for m := range bm.C {
+		msgs = append(msgs, m)
+	}
+
+	return msgs
+}
+
+func (bm *MessageBatch) Err() error {
+	bm.Lock()
+	defer bm.Unlock()
+	return bm.err
 }
 
 // Fetch pulls a batch of messages from a stream for a pull consumer.
@@ -940,14 +957,8 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 		return nil, err
 	}
 
-	// In case of no special options, just send the number with expected messages.
-	var req []byte
-	if batch > 0 && !o.noWait && o.expires == 0 {
-		req = strconv.AppendInt(req, int64(batch), 10)
-	} else {
-		req, _ = json.Marshal(&nextRequest{Batch: batch, NoWait: o.noWait, Expires: o.expires})
-	}
-
+	// First request always uses NoWait to get an error or all the messages from the batch.
+	req, _ := json.Marshal(&nextRequest{Batch: batch, NoWait: true})
 	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
 
 	// Make an old style request, we will wait for first response
@@ -966,11 +977,6 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	// for another request.
 	defer s.Unsubscribe()
 
-	err = s.AutoUnsubscribe(batch)
-	if err != nil {
-		return nil, err
-	}
-
 	// Make a publish request to get results of the pull.
 	err = nc.publish(reqNext, inbox, nil, req)
 	if err != nil {
@@ -984,7 +990,9 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 			switch msg.Header.Get(statusHdr) {
 			case noResponders:
 				return ErrNoResponders
-			case "400", "404", "408", "409":
+			case "404":
+				return ErrNoMessages
+			case "400", "408", "409":
 				return errors.New(msg.Header.Get(descrHdr))
 			}
 		}
@@ -993,6 +1001,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 
 	msgs := make([]*Msg, 0)
 
+	// Get the first message.
 	select {
 	case msg, ok := <-mch:
 		if !ok {
@@ -1012,18 +1021,52 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 		}
 	}
 
-	// We should be getting the response from the server,
-	// in case we got a poll error then stop and cleanup.
-	if err != nil {
+	// If the first error is an no more messages, then
+	// short circuit into lingering max wait request.
+	var gotNoMessages bool
+	if err == ErrNoMessages {
+		gotNoMessages = true
+	} else if err != nil {
+		// We should be getting the response from the server,
+		// in case we got a poll error then stop and cleanup.
 		return nil, err
 	}
 
 	// If only one message expected from batch then already done.
-	if batch == 1 {
-		return msgs, nil
+	var recvd int
+	if !gotNoMessages {
+		if batch == 1 {
+			return msgs, nil
+		}
+		err = s.AutoUnsubscribe(batch)
+		if err != nil {
+			return nil, err
+		}
+		recvd = 1
+	} else {
+		// First message was an error so start from scratch and
+		// make another request.
+		recvd = 0
+		err = s.AutoUnsubscribe(batch + 1)
+		if err != nil {
+			return nil, err
+		}
+
+		// In case of no special options, just send the batch number in bytes.
+		var req []byte
+		if batch > 0 && !o.noWait && o.expires == 0 {
+			req = strconv.AppendInt(req, int64(batch), 10)
+		} else {
+			req, _ = json.Marshal(&nextRequest{Batch: batch, NoWait: o.noWait, Expires: o.expires})
+		}
+
+		// Make another request.
+		err = nc.publish(reqNext, inbox, nil, req)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	recvd := 1
 	for {
 		select {
 		case msg, ok := <-mch:
@@ -1056,6 +1099,229 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	}
 
 	return msgs, err
+}
+
+func (sub *Subscription) PullBatch(batch int, opts ...PullOpt) (*MessageBatch, error) {
+	if sub == nil {
+		return nil, ErrBadSubscription
+	}
+
+	var o pullOpts
+	for _, opt := range opts {
+		if err := opt.configurePull(&o); err != nil {
+			return nil, err
+		}
+	}
+	if o.ctx != nil && o.ttl != 0 {
+		return nil, ErrContextAndTimeout
+	}
+
+	sub.mu.Lock()
+	if sub.jsi == nil || sub.typ != PullSubscription {
+		sub.mu.Unlock()
+		return nil, ErrTypeSubscription
+	}
+
+	// NOTE: Subject only used to lookup to which stream the subject belongs to.
+	nc, _ := sub.conn, sub.Subject
+	stream, consumer := sub.jsi.stream, sub.jsi.consumer
+	js := sub.jsi.js
+
+	ttl := o.ttl
+	if ttl == 0 {
+		ttl = js.wait
+	}
+	sub.mu.Unlock()
+
+	// Use the given context or setup a default one for the span
+	// of the pull batch request.
+	var (
+		ctx    = o.ctx
+		err    error
+		cancel context.CancelFunc
+	)
+	if o.ctx == nil {
+		ctx, cancel = context.WithTimeout(context.Background(), ttl)
+		defer cancel()
+	}
+
+	// Check if context not done already before making the request.
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.Canceled {
+			err = ctx.Err()
+		} else {
+			err = ErrTimeout
+		}
+	default:
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// First request always uses NoWait to get an error or all the messages from the batch.
+	req, _ := json.Marshal(&nextRequest{Batch: batch, NoWait: true})
+	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
+
+	// Make an old style request, we will wait for first response
+	// in case of errors, then dispatch the rest of the replies
+	// to the channel.
+	inbox := NewInbox()
+
+	mch := make(chan *Msg, batch)
+	s, err := nc.subscribe(inbox, _EMPTY_, nil, mch, true, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Remove interest in the subscription at the end so that the
+	// this inbox does not get delivered the results intended
+	// for another request.
+	defer s.Unsubscribe()
+
+	// Make a publish request to get results of the pull.
+	err = nc.publish(reqNext, inbox, nil, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for empty payload message and process synchronously
+	// any status messages.
+	checkMsg := func(msg *Msg) error {
+		if len(msg.Data) == 0 {
+			switch msg.Header.Get(statusHdr) {
+			case noResponders:
+				return ErrNoResponders
+			case "404":
+				return ErrNoMessages
+			case "400", "408", "409":
+				return errors.New(msg.Header.Get(descrHdr))
+			}
+		}
+		return nil
+	}
+
+	// Try to get the first message or error.
+	var (
+		firstMsg *Msg
+		ok       bool
+	)
+	select {
+	case firstMsg, ok = <-mch:
+		if !ok {
+			err = s.getNextMsgErr()
+		} else {
+			err = s.processNextMsgDelivered(firstMsg)
+			if err == nil {
+				err = checkMsg(firstMsg)
+			}
+		}
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+
+	// If the first error is an no more messages, then
+	// short circuit into lingering max wait request.
+	var gotNoMessages bool
+	if err == ErrNoMessages {
+		gotNoMessages = true
+	} else if err != nil {
+		// We should be getting the response from the server,
+		// in case we got a poll error then stop and cleanup.
+		return nil, err
+	}
+
+	// Send the rest of messages into batch.
+	sendCh := make(chan *Msg, batch)
+	b := &MessageBatch{
+		C: sendCh,
+	}
+
+	// Send first message it we got it.
+	if firstMsg != nil {
+		sendCh <- firstMsg
+	}
+
+	var recvd int
+	if !gotNoMessages {
+		// If only one message expected from batch then already done.
+		if batch == 1 {
+			close(sendCh)
+			return b, nil
+		}
+
+		// If expecting more, also send UNSUB so that server
+		// clears interest once enough replies.
+		err = s.AutoUnsubscribe(batch)
+		if err != nil {
+			return nil, err
+		}
+		recvd = 1
+	} else {
+		fmt.Println("no messages!!!!")
+		// First message was an error so start from scratch and
+		// make another request (+1 since we are counting the error).
+		recvd = 0
+		err = s.AutoUnsubscribe(batch + 1)
+		if err != nil {
+			return nil, err
+		}
+
+		// In case of no special options, just send the batch number in bytes.
+		var req []byte
+		if batch > 0 && !o.noWait && o.expires == 0 {
+			req = strconv.AppendInt(req, int64(batch), 10)
+		} else {
+			req, _ = json.Marshal(&nextRequest{Batch: batch, NoWait: o.noWait, Expires: o.expires})
+		}
+
+		// Make another request...
+		err = nc.publish(reqNext, inbox, nil, req)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Start goroutine to deliver all messages async.
+	go func() {
+		defer close(sendCh)
+
+		for {
+			var msg *Msg
+			select {
+			case msg, ok = <-mch:
+				if !ok {
+					// Check if NATS client connection was closed while
+					// awaiting for the next message.
+					err = s.getNextMsgErr()
+				} else {
+					err = s.processNextMsgDelivered(msg)
+					if err == nil {
+						err = checkMsg(msg)
+					}
+					recvd++
+
+					// Send the message to the message batch.
+					sendCh <- msg
+				}
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+			if err != nil {
+				b.Lock()
+				b.err = err
+				b.Unlock()
+				break
+			}
+
+			// Check if enough messages already.
+			if recvd == batch {
+				break
+			}
+		}
+	}()
+
+	return b, err
 }
 
 func (js *js) getConsumerInfo(stream, consumer string) (*ConsumerInfo, error) {
