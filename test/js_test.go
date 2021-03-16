@@ -3914,11 +3914,11 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			t.Fatal(err)
 		}
 
-		_, err = sub.Fetch(1, nats.MaxWait(500*time.Millisecond))
+		_, err = sub.Fetch(1, nats.MaxWait(1*time.Second))
 		if err == nil {
 			t.Fatal("Unexpected success")
 		}
-		if err != nil && (err != nats.ErrTimeout && err != nats.ErrNoResponders) {
+		if err != nil && (err != context.DeadlineExceeded && err != nats.ErrTimeout && err != nats.ErrNoResponders) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 	})
