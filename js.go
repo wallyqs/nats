@@ -896,6 +896,7 @@ func (bm *MessageBatch) Messages() []*Msg {
 	}
 	msgs = make([]*Msg, 0, cap(bm.C))
 	bm.msgs = msgs
+	sendCh := bm.sendCh
 	expected := bm.expected
 	bm.Unlock()
 
@@ -905,11 +906,12 @@ func (bm *MessageBatch) Messages() []*Msg {
 		delivered := bm.delivered
 		bm.Unlock()
 
-		fmt.Println("============", len(bm.sendCh), delivered, expected)
+		// fmt.Println("============", len(bm.sendCh), delivered, expected)
 		select {
-		case msg, _ := <-bm.C:
-			// TODO: Handle channel closed.
-			msgs = append(msgs, msg)
+		case msg, _ := <-sendCh:
+			if msg != nil {
+				msgs = append(msgs, msg)
+			}
 		}
 
 		// Wait until there are no pending messages to be consumed and the batch has received them all.
@@ -1145,19 +1147,18 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 			select {
 			case <-closedCh:
 				// User has called Messsages(), and received them all.
-				fmt.Println("Closed, finished consuming messages")
+				// fmt.Println("Closed, finished consuming messages")
 				close(sendCh)
 				return
 			case <-tick:
-				fmt.Println("At: ", len(sendCh))
 				// Wait until got all and the batch message delivery channel
 				// has been drained before 'closing' the batch.
 				b.Lock()
 				recvd := b.delivered
 				b.Unlock()
+				fmt.Println("TICK!!!!!", len(sendCh), recvd, batch)
 
 				if recvd == batch && len(sendCh) == 0 {
-					fmt.Println("Finished consuming messages")
 					close(sendCh)
 					return
 				}
@@ -1171,12 +1172,6 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 					if err == nil {
 						err = checkMsg(msg)
 					}
-
-					// Send the message to the batch.
-					sendCh <- msg
-					b.Lock()
-					b.delivered++
-					b.Unlock()
 				}
 			case <-ctx.Done():
 				err = ctx.Err()
@@ -1187,6 +1182,16 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				// and keep the goroutine running.
 				b.Lock()
 				b.err = err
+				b.Unlock()
+
+				// Skip delivered message since it is an error.
+				continue
+			}
+			if msg != nil {
+				// Send the message to the batch.
+				sendCh <- msg
+				b.Lock()
+				b.delivered++
 				b.Unlock()
 			}
 		}

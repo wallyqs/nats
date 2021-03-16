@@ -3762,7 +3762,6 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fmt.Println("Got batch: ", bm)
 		msgs := bm.Messages()
 
 		got := len(msgs)
@@ -3770,14 +3769,18 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
 		}
 
-		for _, msg := range msgs {
+		for i, msg := range msgs {
+			fmt.Println(i, ":::", msg)
 			msg.AckSync()
 		}
 
-		// Next fetch will timeout since no more messages.
-		_, err = sub.Fetch(1, nats.MaxWait(250*time.Millisecond))
+		// Next fetch will timeout since there are no more messages.
+		bm, err = sub.Fetch(1, nats.MaxWait(250*time.Millisecond))
 		if err != nats.ErrTimeout {
 			t.Errorf("Expected timeout fetching next message, got: %v", err)
+		}
+		if bm != nil {
+			t.Errorf("Expected no results, got: %v", bm)
 		}
 
 		expected = 5
@@ -3788,6 +3791,12 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 		msgs = bm.Messages()
 		fmt.Println(msgs)
+
+		for i, msg := range msgs {
+			fmt.Println(i, ">>>", msg)
+			// msg.AckSync()
+		}
+
 		got = len(msgs)
 		if got != expected {
 			t.Fatalf("Got %v messages, expected: %v", got, expected)
