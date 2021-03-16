@@ -876,8 +876,9 @@ func PullMaxWaiting(n int) SubOpt {
 // MessageBatch represents a pulled batch of messages.
 type MessageBatch struct {
 	// C is a receive only channel for the messages.
-	C   <-chan *Msg
-	err error
+	C      <-chan *Msg
+	err    error
+	closed bool
 	sync.Mutex
 }
 
@@ -1028,63 +1029,90 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		return nil, err
 	}
 
-	// Send the rest of messages into batch.
-	sendCh := make(chan *Msg, batch)
-	b := &MessageBatch{
-		C: sendCh,
-	}
-
-	// Send first message it we got it.
-	if firstMsg != nil {
-		sendCh <- firstMsg
-	}
-
-	var recvd int
-	if !gotNoMessages {
-		// If only one message expected from batch then already done.
-		if batch == 1 {
-			close(sendCh)
-			return b, nil
-		}
-
-		// If expecting more, also send UNSUB so that server
-		// clears interest once enough replies.
-		err = s.AutoUnsubscribe(batch)
-		if err != nil {
-			return nil, err
-		}
-		recvd = 1
-	} else {
-		// First message was an error so start from scratch and
-		// make another request (+1 since we are counting the error).
-		recvd = 0
+	if gotNoMessages {
+		// We started with a 404 response, so make second long poll
+		// request and wait for the rest of the messages.
+		// NOTE: Since first message was an error we UNSUB (batch+1)
+		// since we are counting the error.
 		err = s.AutoUnsubscribe(batch + 1)
 		if err != nil {
 			return nil, err
 		}
 
 		// In case of no special options, just send the batch number in bytes.
+		// TODO: Default expires?
 		var req []byte
 		if batch > 0 && !o.noWait && o.expires == 0 {
 			req = strconv.AppendInt(req, int64(batch), 10)
 		} else {
-			req, _ = json.Marshal(&nextRequest{Batch: batch, NoWait: o.noWait, Expires: o.expires})
+			req, _ = json.Marshal(&nextRequest{Batch: batch, Expires: o.expires})
 		}
 
-		// Make another request...
+		// Make another request and wait for the result...
 		err = nc.publish(reqNext, inbox, nil, req)
+		if err != nil {
+			return nil, err
+		}
+
+		// Try to get the first result again or return the error.
+		select {
+		case firstMsg, ok = <-mch:
+			if !ok {
+				err = s.getNextMsgErr()
+			} else {
+				err = s.processNextMsgDelivered(firstMsg)
+				if err == nil {
+					err = checkMsg(firstMsg)
+				}
+			}
+		case <-ctx.Done():
+			err = ctx.Err()
+			if err != context.Canceled {
+				err = ErrTimeout
+			}
+		}
+
+		// If second request failed, then abort and unsubscribe.
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// We are receiving messages at this point, so also send UNSUB to let
+		// the server clear interest once there are enough replies.
+		err = s.AutoUnsubscribe(batch)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// Start goroutine to deliver all messages async.
+	// No errors at this point, feed the rest of messages into a batch
+	// from where they can be consumed.
+	sendCh := make(chan *Msg, batch)
+	b := &MessageBatch{
+		C: sendCh,
+	}
+
+	// Send the first proper message that got delivered already,
+	// then start goroutine to deliver rest of messages async.
+	sendCh <- firstMsg
 	go func() {
-		defer close(sendCh)
+		// Stop goroutine once all messages from the batch have been consumed.
+		tick := time.Tick(1 * time.Second)
 
 		for {
 			var msg *Msg
 			select {
+			case <-tick:
+				fmt.Println("At: ", len(sendCh))
+				// Wait until the batch message delivery channel has been drained.
+				if len(sendCh) == 0 {
+					fmt.Println("Finished consuming messages")
+					close(sendCh)
+					b.Lock()
+					b.closed = true
+					b.Unlock()
+				}
+				return
 			case msg, ok = <-mch:
 				if !ok {
 					// Check if NATS client connection was closed while
@@ -1095,7 +1123,6 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 					if err == nil {
 						err = checkMsg(msg)
 					}
-					recvd++
 
 					// Send the message to the message batch.
 					sendCh <- msg
@@ -1103,16 +1130,11 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 			case <-ctx.Done():
 				err = ctx.Err()
 			}
+
 			if err != nil {
 				b.Lock()
 				b.err = err
 				b.Unlock()
-				return
-			}
-
-			// Check if enough messages already.
-			if recvd == batch {
-				return
 			}
 		}
 	}()

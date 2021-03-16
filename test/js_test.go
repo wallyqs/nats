@@ -3758,10 +3758,12 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 		defer sub.Unsubscribe()
 
-		bm, err := sub.Fetch(expected, nats.MaxWait(2*time.Second))
+		fmt.Println("---------")
+		bm, err := sub.Fetch(expected, nats.MaxWait(5*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
+		fmt.Println("Got batch: ", bm)
 		msgs := bm.Messages()
 
 		got := len(msgs)
