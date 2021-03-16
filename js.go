@@ -875,20 +875,52 @@ func PullMaxWaiting(n int) SubOpt {
 
 // MessageBatch represents a pulled batch of messages.
 type MessageBatch struct {
-	// C is a receive only channel for the messages.
-	C      <-chan *Msg
-	err    error
-	closed bool
+	C        <-chan *Msg
+	sendCh   chan *Msg
+	err      error
+	closedCh chan struct{}
 	sync.Mutex
+	msgs      []*Msg
+	delivered int
+	expected  int
 }
 
+// Messages waits to gather all pending messages from a batch.
 func (bm *MessageBatch) Messages() []*Msg {
-	msgs := make([]*Msg, 0, cap(bm.C))
-
-	// When called, does the async waiting for all the messages.
-	for m := range bm.C {
-		msgs = append(msgs, m)
+	// Check if messages have been consumed already.
+	bm.Lock()
+	msgs := bm.msgs
+	if msgs != nil {
+		bm.Unlock()
+		return msgs
 	}
+	msgs = make([]*Msg, 0, cap(bm.C))
+	bm.msgs = msgs
+	expected := bm.expected
+	bm.Unlock()
+
+	// Start consuming the delivered messages.
+	for {
+		bm.Lock()
+		delivered := bm.delivered
+		bm.Unlock()
+
+		fmt.Println("============", len(bm.sendCh), delivered, expected)
+		select {
+		case msg, _ := <-bm.C:
+			// TODO: Handle channel closed.
+			msgs = append(msgs, msg)
+		}
+
+		// Wait until there are no pending messages to be consumed and the batch has received them all.
+		if len(bm.sendCh) == 0 && delivered == expected {
+			break
+		}
+	}
+
+	bm.Lock()
+	close(bm.closedCh)
+	bm.Unlock()
 
 	return msgs
 }
@@ -1084,17 +1116,26 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 			return nil, err
 		}
 	}
-
 	// No errors at this point, feed the rest of messages into a batch
 	// from where they can be consumed.
+
+	// We use a couple of channels to coordinate with consumers.
 	sendCh := make(chan *Msg, batch)
+	closedCh := make(chan struct{})
 	b := &MessageBatch{
-		C: sendCh,
+		C:        sendCh,
+		sendCh:   sendCh,
+		closedCh: closedCh,
+		expected: batch,
 	}
 
 	// Send the first proper message that got delivered already,
 	// then start goroutine to deliver rest of messages async.
-	sendCh <- firstMsg
+	if firstMsg != nil {
+		sendCh <- firstMsg
+		b.delivered++
+	}
+
 	go func() {
 		// Stop goroutine once all messages from the batch have been consumed.
 		tick := time.Tick(1 * time.Second)
@@ -1102,17 +1143,24 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		for {
 			var msg *Msg
 			select {
+			case <-closedCh:
+				// User has called Messsages(), and received them all.
+				fmt.Println("Closed, finished consuming messages")
+				close(sendCh)
+				return
 			case <-tick:
 				fmt.Println("At: ", len(sendCh))
-				// Wait until the batch message delivery channel has been drained.
-				if len(sendCh) == 0 {
+				// Wait until got all and the batch message delivery channel
+				// has been drained before 'closing' the batch.
+				b.Lock()
+				recvd := b.delivered
+				b.Unlock()
+
+				if recvd == batch && len(sendCh) == 0 {
 					fmt.Println("Finished consuming messages")
 					close(sendCh)
-					b.Lock()
-					b.closed = true
-					b.Unlock()
+					return
 				}
-				return
 			case msg, ok = <-mch:
 				if !ok {
 					// Check if NATS client connection was closed while
@@ -1124,14 +1172,19 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 						err = checkMsg(msg)
 					}
 
-					// Send the message to the message batch.
+					// Send the message to the batch.
 					sendCh <- msg
+					b.Lock()
+					b.delivered++
+					b.Unlock()
 				}
 			case <-ctx.Done():
 				err = ctx.Err()
 			}
-
 			if err != nil {
+				// The batch may have had an error though we
+				// still let the consumers pull any pending data
+				// and keep the goroutine running.
 				b.Lock()
 				b.err = err
 				b.Unlock()

@@ -3758,7 +3758,6 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 		defer sub.Unsubscribe()
 
-		fmt.Println("---------")
 		bm, err := sub.Fetch(expected, nats.MaxWait(5*time.Second))
 		if err != nil {
 			t.Fatal(err)
@@ -3788,9 +3787,10 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 		msgs = bm.Messages()
+		fmt.Println(msgs)
 		got = len(msgs)
 		if got != expected {
-			t.Fatalf("Got %v messages, expected at least: %v", got, expected)
+			t.Fatalf("Got %v messages, expected: %v", got, expected)
 		}
 
 		for _, msg := range msgs {
@@ -3959,13 +3959,13 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 
 		expected := 10
 		sendMsgs(t, expected)
-		sub, err := js.PullSubscribe(subject, nats.Durable("pull-batch"))
+		sub, err := js.PullSubscribe(subject, nats.Durable("pull-batch-func"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer sub.Unsubscribe()
 
-		ctx, done := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, done := context.WithTimeout(context.Background(), 2*time.Second)
 		defer done()
 		recvd := make([]*nats.Msg, 0)
 
@@ -3977,20 +3977,35 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			default:
 			}
 
-			bm, err := sub.Fetch(1, nats.MaxWait(250*time.Millisecond))
+			batch, err := sub.Fetch(1, nats.MaxWait(2*time.Second))
 			if err != nil {
 				t.Fatalf("Unexpected error: %v", err)
 			}
 
-			var nextMsg *nats.Msg
-			select {
-			case nextMsg = <-bm.C:
-			case <-ctx.Done():
-				break Loop
-			}
-			recvd = append(recvd, nextMsg)
+			// var nextMsg *nats.Msg
+			// select {
+			// case nextMsg = <-bm.C:
+			// case <-ctx.Done():
+			// 	break Loop
+			// }
 
-			for msg := range bm.C {
+			// Slow way to consume messages because the iterator
+			// takes a 1 second to close.
+			// msg := <-batch.C
+			// fmt.Println(time.Now(), "Got: ", string(msg.Data))
+			// recvd = append(recvd, msg)
+			// err = msg.AckSync()
+			// if err != nil {
+			// 	t.Error(err)
+			// }
+
+			// fmt.Println(nextMsg)
+
+			// Waits for all messages to be delivered under
+			// the original wait timeout.
+			msgs := batch.Messages()
+			recvd = append(recvd, msgs...)
+			for _, msg := range msgs {
 				err = msg.AckSync()
 				if err != nil {
 					t.Error(err)
@@ -4010,8 +4025,8 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 
 		// There should only be timeout errors since no more messages.
 		bm, err := sub.Fetch(expected, nats.MaxWait(100*time.Millisecond))
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
+		if err == nil {
+			t.Fatalf("Unexpected success")
 		}
 		time.Sleep(500 * time.Millisecond)
 		if bm != nil && bm.Err() == nil {
