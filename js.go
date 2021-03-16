@@ -1156,7 +1156,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				b.Lock()
 				recvd := b.delivered
 				b.Unlock()
-				fmt.Println("TICK!!!!!", len(sendCh), recvd, batch)
+				fmt.Println("TICK!!!!!", len(sendCh), recvd, batch, consumer)
 
 				if recvd == batch && len(sendCh) == 0 {
 					close(sendCh)
