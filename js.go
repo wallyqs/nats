@@ -848,10 +848,8 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 }
 
 type pullOpts struct {
-	noWait  bool
-	ttl     time.Duration
-	ctx     context.Context
-	expires time.Duration
+	ttl time.Duration
+	ctx context.Context
 }
 
 type PullOpt interface {
@@ -873,16 +871,33 @@ func PullMaxWaiting(n int) SubOpt {
 	})
 }
 
-// MessageBatch represents a pulled batch of messages.
+// MessageBatch represents a batch of messages pulled with a PullSubscription.
 type MessageBatch struct {
-	C        <-chan *Msg
-	sendCh   chan *Msg
-	err      error
-	closedCh chan struct{}
 	sync.Mutex
-	msgs      []*Msg
+
+	// C is a receive only channel to consume messages from a batch as they
+	// are delivered by the server.
+	C <-chan *Msg
+
+	// sendCh is the channel used to send messages that can be consumed.
+	sendCh chan *Msg
+
+	// clo
+	closedCh chan struct{}
+
+	// err is the last error that may have occured during the batch request.
+	err error
+
+	// msgs is a memoized version of the collection of messages
+	// for when the batch of messages is complete.
+	msgs []*Msg
+
+	// delivered is the number of messages already delivered by the
+	// server that may or may not yet have been consumed.
 	delivered int
-	expected  int
+
+	// expected is the awaited number of messages ofr this batch.
+	expected int
 }
 
 // Messages waits to gather all pending messages from a batch.
@@ -906,19 +921,15 @@ func (bm *MessageBatch) Messages() []*Msg {
 		delivered := bm.delivered
 		bm.Unlock()
 
-		// fmt.Println("============", len(bm.C), len(sendCh), delivered, expected, len(msgs))
 		select {
 		case msg, _ := <-sendCh:
-			// fmt.Println(">>>>", msg)
 			if msg != nil {
 				msgs = append(msgs, msg)
 			}
 		}
-		// fmt.Println("OK", len(bm.C), len(sendCh), delivered, expected, len(msgs))
 
 		// Wait until there are no pending messages to be consumed and the batch has received them all.
 		if len(sendCh) == 0 && delivered == expected {
-			// fmt.Println("Going away", len(bm.C), len(sendCh), delivered, expected)
 			break
 		}
 	}
@@ -995,13 +1006,16 @@ func (sub *Subscription) FetchMsg(opts ...PullOpt) (*Msg, error) {
 	}
 
 	// First request always uses NoWait to get an error or all the messages from the batch.
-	req, _ := json.Marshal(&nextRequest{Batch: 1, NoWait: true})
+	nr := &nextRequest{Batch: 1, NoWait: true}
+	req, _ := json.Marshal(nr)
 	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
-
 	resp, err := nc.RequestWithContext(ctx, reqNext, req)
 	if err != nil {
 		// Retry but without using NoWait, expecting a single message.
-		return nc.RequestWithContext(ctx, reqNext, []byte("1"))
+		nr.NoWait = false
+		nr.Expires = ttl - 10*time.Millisecond
+		req, _ := json.Marshal(nr)
+		return nc.RequestWithContext(ctx, reqNext, req)
 	}
 	return resp, nil
 }
@@ -1027,9 +1041,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		sub.mu.Unlock()
 		return nil, ErrTypeSubscription
 	}
-
-	// NOTE: Subject only used to lookup to which stream the subject belongs to.
-	nc, _ := sub.conn, sub.Subject
+	nc := sub.conn
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	js := sub.jsi.js
 
@@ -1103,7 +1115,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		return nil
 	}
 
-	// Try to get the first message or error.
+	// Try to get the first message or error with NoWait.
 	var (
 		firstMsg *Msg
 		ok       bool
@@ -1121,16 +1133,15 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
-	// fmt.Println("THIS:", firstMsg, err)
 
-	// If the first error is an no more messages, then
-	// short circuit into lingering max wait request.
+	// If the first error is an no more messages, then switch into
+	// form of the request that waits longer for messages.
 	var gotNoMessages bool
 	if err == ErrNoMessages {
 		gotNoMessages = true
 	} else if err != nil {
-		// We should be getting the response from the server,
-		// in case we got a poll error then stop and cleanup.
+		// We should be getting the response from the server
+		// in case we got a poll error, so stop and cleanup.
 		s.Unsubscribe()
 		return nil, err
 	}
@@ -1228,13 +1239,11 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				b.Unlock()
 				return
 			case <-tick:
-				// Wait until got all and the batch message delivery channel
+				// Wait until getting all and the batch message delivery channel
 				// has been drained before 'closing' the batch.
 				b.Lock()
 				recvd := b.delivered
 				b.Unlock()
-				// fmt.Println("TICK!!!!!", len(mch), len(sendCh), recvd, batch, consumer, err)
-				// fmt.Printf("SUB: %+v\n", s)
 
 				if len(sendCh) == 0 && recvd == batch {
 					// Close and nil the channel so that it blocks
@@ -1250,7 +1259,6 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 					// Check if NATS client connection was closed while
 					// awaiting for the next message.
 					err = s.getNextMsgErr()
-					// fmt.Printf("INVALID SUB? %+v || %+v\n", err)
 
 					// On either connection closed / invalid sub,
 					// make this channel block so that it is skipped.
@@ -1282,9 +1290,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				sendCh <- msg
 				b.Lock()
 				b.delivered++
-				// recvd := b.delivered
 				b.Unlock()
-				// fmt.Println("STATE:", len(sendCh), recvd, batch, consumer)
 			}
 		}
 	}()
