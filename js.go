@@ -906,19 +906,19 @@ func (bm *MessageBatch) Messages() []*Msg {
 		delivered := bm.delivered
 		bm.Unlock()
 
-		fmt.Println("============", len(bm.C), len(sendCh), delivered, expected, len(msgs))
+		// fmt.Println("============", len(bm.C), len(sendCh), delivered, expected, len(msgs))
 		select {
-		case msg, _ := <-bm.C:
-			fmt.Println(">>>>", msg)
+		case msg, _ := <-sendCh:
+			// fmt.Println(">>>>", msg)
 			if msg != nil {
 				msgs = append(msgs, msg)
 			}
 		}
-		fmt.Println("OK", len(bm.C), len(sendCh), delivered, expected, len(msgs))
+		// fmt.Println("OK", len(bm.C), len(sendCh), delivered, expected, len(msgs))
 
 		// Wait until there are no pending messages to be consumed and the batch has received them all.
-		if len(bm.C) == 0 && delivered == expected {
-			fmt.Println("Going away", len(bm.C), len(sendCh), delivered, expected)
+		if len(sendCh) == 0 && delivered == expected {
+			// fmt.Println("Going away", len(bm.C), len(sendCh), delivered, expected)
 			break
 		}
 	}
@@ -1121,7 +1121,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
-	fmt.Println("THIS:", firstMsg)
+	// fmt.Println("THIS:", firstMsg, err)
 
 	// If the first error is an no more messages, then
 	// short circuit into lingering max wait request.
@@ -1140,13 +1140,13 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		// request and wait for the rest of the messages.
 		// NOTE: Since first message was an error we UNSUB (batch+1)
 		// since we are counting the error.
-		// err = s.AutoUnsubscribe(batch + 1)
-		// if err != nil {
-		// 	return nil, err
-		// }
+		err = s.AutoUnsubscribe(batch + 1)
+		if err != nil {
+			return nil, err
+		}
 
 		// In case of no special options, just send the batch number in bytes.
-		// TODO: Default expires?
+		// TODO: Set default expires?
 		var req []byte
 		if batch > 0 && !o.noWait && o.expires == 0 {
 			req = strconv.AppendInt(req, int64(batch), 10)
@@ -1163,7 +1163,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		// Try to get the first result again or return the error.
 		select {
 		case firstMsg, ok = <-mch:
-			fmt.Println("THAT", firstMsg)
+			// fmt.Println("THAT", firstMsg)
 			if !ok {
 				err = s.getNextMsgErr()
 			} else {
@@ -1187,10 +1187,10 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 	} else {
 		// We are receiving messages at this point, so also send UNSUB to let
 		// the server clear interest once there are enough replies.
-		// err = s.AutoUnsubscribe(batch)
-		// if err != nil {
-		// 	return nil, err
-		// }
+		err = s.AutoUnsubscribe(batch)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// No errors at this point, feed the rest of messages into a batch
 	// from where they can be consumed.
@@ -1220,6 +1220,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		// Stop goroutine once all messages from the batch have been consumed.
 		tick := time.Tick(1 * time.Second)
 
+		var err error
 		for {
 			var msg *Msg
 			select {
@@ -1233,24 +1234,26 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				// has been drained before 'closing' the batch.
 				b.Lock()
 				recvd := b.delivered
-				err := b.err
+				// err := b.err
 				b.Unlock()
-				fmt.Println("TICK!!!!!", len(mch), len(sendCh), recvd, batch, consumer, err)
-				fmt.Printf("SUB: %+v\n", s)
+				// fmt.Println("TICK!!!!!", len(mch), len(sendCh), recvd, batch, consumer, err)
+				// fmt.Printf("SUB: %+v\n", s)
 
 				if len(sendCh) == 0 && recvd == batch {
 					close(sendCh)
 					return
 				}
 			case msg, ok = <-mch:
-				fmt.Println("MSG", msg)
+				// fmt.Println("MSG", msg)
 				if !ok {
 					// Check if NATS client connection was closed while
 					// awaiting for the next message.
 					err = s.getNextMsgErr()
-					fmt.Printf("INVALID SUB? %+v || %+v\n", err, s)
+					fmt.Printf("INVALID SUB? %+v || %+v\n", err)
 
-					if err == ErrBadSubscription {
+					// On either connection closed / invalid sub,
+					// make this channel block so that it is skipped.
+					if err != nil {
 						mch = nil
 					}
 				} else {
@@ -1278,9 +1281,9 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				sendCh <- msg
 				b.Lock()
 				b.delivered++
-				recvd := b.delivered
+				// recvd := b.delivered
 				b.Unlock()
-				fmt.Println("STATE:", len(sendCh), recvd, batch, consumer)
+				// fmt.Println("STATE:", len(sendCh), recvd, batch, consumer)
 			}
 		}
 	}()
