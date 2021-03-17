@@ -3747,6 +3747,28 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 	}
 
+	t.Run("fetch msg", func(t *testing.T) {
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+		sub, err := js.PullSubscribe(subject, nats.Durable("fetcher"), nats.PullMaxWaiting(10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Unsubscribe()
+
+		// Gets a single message and done.
+		msg, err := sub.FetchMsg(nats.MaxWait(5 * time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = msg.AckSync()
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("batch size", func(t *testing.T) {
 		defer js.PurgeStream(subject)
 
@@ -4073,7 +4095,7 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 				break
 			}
 		}
-		
+
 		got := len(recvd)
 		if got != expected {
 			t.Fatalf("Got %v messages, expected at least: %v", got, expected)

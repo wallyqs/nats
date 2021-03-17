@@ -933,6 +933,77 @@ func (bm *MessageBatch) Err() error {
 	return bm.err
 }
 
+// FetchMsg gets a single message for a pull based consumer.
+func (sub *Subscription) FetchMsg(opts ...PullOpt) (*Msg, error) {
+	if sub == nil {
+		return nil, ErrBadSubscription
+	}
+	var o pullOpts
+	for _, opt := range opts {
+		if err := opt.configurePull(&o); err != nil {
+			return nil, err
+		}
+	}
+	if o.ctx != nil && o.ttl != 0 {
+		return nil, ErrContextAndTimeout
+	}
+
+	sub.mu.Lock()
+	if sub.jsi == nil || sub.typ != PullSubscription {
+		sub.mu.Unlock()
+		return nil, ErrTypeSubscription
+	}
+
+	// NOTE: Subject only used to lookup to which stream the subject belongs to.
+	nc, _ := sub.conn, sub.Subject
+	stream, consumer := sub.jsi.stream, sub.jsi.consumer
+	js := sub.jsi.js
+
+	ttl := o.ttl
+	if ttl == 0 {
+		ttl = js.wait
+	}
+	sub.mu.Unlock()
+
+	// Use the given context or setup a default one for the span
+	// of the pull batch request.
+	var (
+		ctx    = o.ctx
+		err    error
+		cancel context.CancelFunc
+	)
+	if o.ctx == nil {
+		ctx, cancel = context.WithTimeout(context.Background(), ttl)
+		defer cancel()
+	}
+
+	// Check if context not done already before making the request.
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.Canceled {
+			err = ctx.Err()
+		} else {
+			err = ErrTimeout
+		}
+	default:
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// First request always uses NoWait to get an error or all the messages from the batch.
+	req, _ := json.Marshal(&nextRequest{Batch: 1, NoWait: true})
+	reqNext := js.apiSubj(fmt.Sprintf(apiRequestNextT, stream, consumer))
+
+	resp, err := nc.RequestWithContext(ctx, reqNext, req)
+	if err != nil {
+		// Retry but without using NoWait, expecting a single message.
+		return nc.RequestWithContext(ctx, reqNext, []byte("1"))
+	}
+	return resp, nil
+}
+
+// Fetch retrieves a batch of messages for a pull consumer.
 func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error) {
 	if sub == nil {
 		return nil, ErrBadSubscription
