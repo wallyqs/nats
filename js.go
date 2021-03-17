@@ -1135,6 +1135,8 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		return nil, err
 	}
 
+	// Set the next longer request to expire before the client goes away.
+	expires := ttl - 10*time.Millisecond
 	if gotNoMessages {
 		// We started with a 404 response, so make second long poll
 		// request and wait for the rest of the messages.
@@ -1146,13 +1148,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 		}
 
 		// In case of no special options, just send the batch number in bytes.
-		// TODO: Set default expires?
-		var req []byte
-		if batch > 0 && !o.noWait && o.expires == 0 {
-			req = strconv.AppendInt(req, int64(batch), 10)
-		} else {
-			req, _ = json.Marshal(&nextRequest{Batch: batch, Expires: o.expires})
-		}
+		req, _ = json.Marshal(&nextRequest{Batch: batch, Expires: expires})
 
 		// Make another request and wait for the result...
 		err = nc.publish(reqNext, inbox, nil, req)
@@ -1199,6 +1195,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 	sendCh := make(chan *Msg, batch)
 	closedCh := make(chan struct{})
 	b := &MessageBatch{
+		// C is a receive only version of the same channel.
 		C:        sendCh,
 		sendCh:   sendCh,
 		closedCh: closedCh,
@@ -1207,10 +1204,8 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 
 	// Send the first proper message that got delivered already,
 	// then start goroutine to deliver rest of messages async.
-	// if firstMsg != nil
 	sendCh <- firstMsg
 	b.delivered++
-	// }
 
 	go func() {
 		// Remove interest in the subscription at the end to remotely cancel
@@ -1225,31 +1220,37 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 			var msg *Msg
 			select {
 			case <-closedCh:
-				// User has called Messsages(), and received them all.
-				// fmt.Println("Closed, finished consuming messages")
+				// The channel has been drained so signal any consumer
+				// that might be waiting
+				b.Lock()
 				close(sendCh)
+				b.sendCh = nil
+				b.Unlock()
 				return
 			case <-tick:
 				// Wait until got all and the batch message delivery channel
 				// has been drained before 'closing' the batch.
 				b.Lock()
 				recvd := b.delivered
-				// err := b.err
 				b.Unlock()
 				// fmt.Println("TICK!!!!!", len(mch), len(sendCh), recvd, batch, consumer, err)
 				// fmt.Printf("SUB: %+v\n", s)
 
 				if len(sendCh) == 0 && recvd == batch {
+					// Close and nil the channel so that it blocks
+					// and empty messages are not received.
+					b.Lock()
 					close(sendCh)
+					b.sendCh = nil
+					b.Unlock()
 					return
 				}
 			case msg, ok = <-mch:
-				// fmt.Println("MSG", msg)
 				if !ok {
 					// Check if NATS client connection was closed while
 					// awaiting for the next message.
 					err = s.getNextMsgErr()
-					fmt.Printf("INVALID SUB? %+v || %+v\n", err)
+					// fmt.Printf("INVALID SUB? %+v || %+v\n", err)
 
 					// On either connection closed / invalid sub,
 					// make this channel block so that it is skipped.
