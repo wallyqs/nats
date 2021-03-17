@@ -3807,12 +3807,13 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 
 		expected = 5
 		sendMsgs(t, expected)
-		bm, err = sub.Fetch(expected, nats.MaxWait(1*time.Second))
+		bm, err = sub.Fetch(expected, nats.MaxWait(2*time.Second))
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
+		fmt.Println("WAIT FOR MESSAGES!!!!")
 		msgs = bm.Messages()
-		fmt.Println(msgs)
+		fmt.Println("DONE: ", msgs)
 
 		for i, msg := range msgs {
 			fmt.Println(i, ">>>", msg)
