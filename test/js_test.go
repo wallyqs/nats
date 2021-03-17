@@ -3960,28 +3960,43 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		// Poll more than the default max of waiting/inflight pull requests,
 		// so that We will get only 408 timeout errors.
 		errCh := make(chan error, 1024)
+
+		// Only get 10 msgs, the rest should be errors.
+		recvd := make(chan *nats.Msg, 10)
+
 		defer close(errCh)
 		var wg sync.WaitGroup
 		for i := 0; i < 1024; i++ {
 			wg.Add(1)
 
 			go func() {
-				_, err := sub.Fetch(1, nats.MaxWait(500*time.Millisecond))
+				batch, err := sub.Fetch(1, nats.MaxWait(500*time.Millisecond))
 				defer wg.Done()
 				if err != nil {
 					errCh <- err
+				}
+
+				// A batch could have at most a message.
+				if batch != nil {
+					for msg := range batch.C {
+						recvd <- msg
+					}
 				}
 			}()
 		}
 		wg.Wait()
 
 		select {
-		case <-time.After(1 * time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatal("Expected RequestTimeout (408) error due to many inflight pulls")
 		case err := <-errCh:
 			if err != nil && (err.Error() != `Request Timeout` && err != nats.ErrTimeout) {
 				t.Errorf("Expected request timeout fetching next message, got: %+v", err)
 			}
+		}
+		fmt.Println("ERRORS:", len(errCh))
+		if len(recvd) != expected {
+			t.Errorf("Expected %v messages, got: %v", expected, len(recvd))
 		}
 	})
 
@@ -4057,7 +4072,7 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 		}
 		defer sub.Unsubscribe()
 
-		ctx, done := context.WithTimeout(context.Background(), 4*time.Second)
+		ctx, done := context.WithTimeout(context.Background(), 2*time.Second)
 		defer done()
 		recvd := make([]*nats.Msg, 0)
 

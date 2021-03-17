@@ -906,16 +906,17 @@ func (bm *MessageBatch) Messages() []*Msg {
 		delivered := bm.delivered
 		bm.Unlock()
 
-		// fmt.Println("============", len(bm.sendCh), delivered, expected)
+		fmt.Println("============", len(bm.C), len(sendCh), delivered, expected)
 		select {
-		case msg, _ := <-sendCh:
+		case msg, _ := <-bm.C:
 			if msg != nil {
 				msgs = append(msgs, msg)
 			}
 		}
 
 		// Wait until there are no pending messages to be consumed and the batch has received them all.
-		if len(bm.sendCh) == 0 && delivered == expected {
+		if len(bm.C) == 0 && delivered == expected {
+			fmt.Println("Going away", len(bm.C), len(sendCh), delivered, expected)
 			break
 		}
 	}
@@ -1229,7 +1230,7 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) (*MessageBatch, error
 				b.Unlock()
 				fmt.Println("TICK!!!!!", len(sendCh), recvd, batch, consumer)
 
-				if recvd == batch && len(sendCh) == 0 {
+				if len(sendCh) == 0 && recvd == batch {
 					close(sendCh)
 					return
 				}
