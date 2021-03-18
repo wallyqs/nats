@@ -93,6 +93,13 @@ func (nc *Conn) requestWithContext(ctx context.Context, subj string, hdr, data [
 // oldRequestWithContext utilizes inbox and subscription per request.
 func (nc *Conn) oldRequestWithContext(ctx context.Context, subj string, hdr, data []byte) (*Msg, error) {
 	inbox := NewInbox()
+
+	nc.mu.RLock()
+	customInbox := nc.Opts.CustomInboxPrefix
+	nc.mu.RUnlock()
+	if customInbox != "" {
+		inbox = customInbox + inbox[inboxPrefixLen:]
+	}
 	ch := make(chan *Msg, RequestChanLen)
 
 	s, err := nc.subscribe(inbox, _EMPTY_, nil, ch, true, nil)

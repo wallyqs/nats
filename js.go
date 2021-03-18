@@ -140,12 +140,14 @@ type js struct {
 	opts *jsOpts
 
 	// For async publish context.
-	mu   sync.RWMutex
-	rpre string
-	rsub *Subscription
-	pafs map[string]*PubAckFuture
-	stc  chan struct{}
-	dch  chan struct{}
+	mu       sync.RWMutex
+	rpre     string
+	rsub     *Subscription
+	pafs     map[string]*PubAckFuture
+	stc      chan struct{}
+	dch      chan struct{}
+	cinbox   string
+	inboxLen int
 }
 
 type jsOpts struct {
@@ -188,6 +190,16 @@ func (nc *Conn) JetStream(opts ...JSOpt) (JetStreamContext, error) {
 	checkAccount := now.Sub(nc.jsLastCheck) > defaultAccountCheck
 	if checkAccount {
 		nc.jsLastCheck = now
+	}
+
+	// Pub Async has its own request handler, so take a copy of it
+	// in case the default one was changed.
+	customInbox := nc.Opts.CustomInboxPrefix
+	if customInbox != "" {
+		js.cinbox = customInbox
+		js.inboxLen = len(customInbox) + aReplyTokensize + 1
+	} else {
+		js.inboxLen = aReplyPreLen
 	}
 	nc.mu.Unlock()
 
@@ -404,7 +416,16 @@ func (js *js) newAsyncReply() string {
 		for i := 0; i < aReplyTokensize; i++ {
 			b[i] = rdigits[int(b[i]%base)]
 		}
-		js.rpre = fmt.Sprintf("%s%s.", InboxPrefix, b[:aReplyTokensize])
+
+		// Use custom inbox prefix if set as an option from nats.Connect
+		var prefix string
+		if js.cinbox != "" {
+			prefix = js.cinbox
+		} else {
+			prefix = InboxPrefix
+		}
+
+		js.rpre = fmt.Sprintf("%s%s.", prefix, b[:aReplyTokensize])
 		sub, err := js.nc.Subscribe(fmt.Sprintf("%s*", js.rpre), js.handleAsyncReply)
 		if err != nil {
 			js.mu.Unlock()
@@ -473,10 +494,10 @@ func (js *js) asyncStall() <-chan struct{} {
 
 // Handle an async reply from PublishAsync.
 func (js *js) handleAsyncReply(m *Msg) {
-	if len(m.Subject) <= aReplyPreLen {
+	if len(m.Subject) <= js.inboxLen {
 		return
 	}
-	id := m.Subject[aReplyPreLen:]
+	id := m.Subject[js.inboxLen:]
 
 	js.mu.Lock()
 	paf := js.getPAF(id)
@@ -609,7 +630,7 @@ func (js *js) PublishMsgAsync(m *Msg, opts ...PubOpt) (*PubAckFuture, error) {
 	if m.Reply == _EMPTY_ {
 		return nil, errors.New("nats: error creating async reply handler")
 	}
-	id := m.Reply[aReplyPreLen:]
+	id := m.Reply[js.inboxLen:]
 	paf := &PubAckFuture{msg: m, st: time.Now()}
 	numPending, maxPending := js.registerPAF(id, paf)
 
