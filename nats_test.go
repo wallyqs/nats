@@ -2599,3 +2599,30 @@ func TestMsg_RespondMsg(t *testing.T) {
 		t.Fatalf("did not get correct response: %q", resp.Data)
 	}
 }
+
+func TestMsg_RespondMsg_Custom(t *testing.T) {
+	s := RunServerOnPort(-1)
+	defer s.Shutdown()
+
+	nc, err := Connect(s.ClientURL(), CustomInboxPrefix("_my_inbox"))
+	if err != nil {
+		t.Fatalf("Expected to connect to server, got %v", err)
+	}
+	defer nc.Close()
+
+	nc.Subscribe("foo", func(msg *Msg) {
+		msg.Respond([]byte("OK"))
+	})
+
+	msgs := make([]*Msg, 0)
+	for i := 0; i < 100; i++ {
+		resp, err := nc.Request("foo", []byte("bar"), 2*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		msgs = append(msgs, resp)
+	}
+	if len(msgs) != 100 {
+		t.Fatalf("Expected all messages, got: %v", len(msgs))
+	}
+}
