@@ -581,9 +581,6 @@ func TestJetStreamSubscribe(t *testing.T) {
 }
 
 func TestJetStreamAckPending_Pull(t *testing.T) {
-	// TODO(jaime): Re-enable after API changes.
-	t.SkipNow()
-
 	s := RunBasicJetStreamServer()
 	defer s.Shutdown()
 
@@ -2175,10 +2172,7 @@ func TestJetStreamInterfaces(t *testing.T) {
 	publishMsg(js, []byte("hello world"))
 }
 
-// WIP(dlc) - This is in support of stall based tests and processing.
 func TestJetStreamPullBasedStall(t *testing.T) {
-	t.SkipNow()
-
 	conf := createConfFile(t, []byte(`
 		listen: 127.0.0.1:-1
 		jetstream: enabled
@@ -2227,6 +2221,45 @@ func TestJetStreamPullBasedStall(t *testing.T) {
 		nc.Publish("STALL", msg)
 	}
 	nc.Flush()
+
+	info, err := js.StreamInfo("STALL")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if info.State.Msgs != uint64(toSend) {
+		t.Fatalf("Expected %d messages, got %d", toSend, info.State.Msgs)
+	}
+
+	batch := 100
+	sub, err := js.PullSubscribe("STALL", nats.Durable("test"))
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	received := 0
+	for received < toSend {
+		msgs, err := sub.Fetch(batch, nats.Context(ctx))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, m := range msgs {
+			received++
+			meta, _ := m.MetaData()
+			if meta.Consumer != uint64(received) {
+				t.Fatalf("Missed something, wanted %d but got %d", received, meta.Consumer)
+			}
+			m.Ack()
+		}
+	}
+	if received != toSend {
+		t.Fatalf("Expected %d, got %d", toSend, received)
+	}
 }
 
 func TestJetStreamSubscribe_DeliverPolicy(t *testing.T) {
