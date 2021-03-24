@@ -2826,15 +2826,17 @@ func NewMsg(subject string) *Msg {
 }
 
 const (
-	hdrLine      = "NATS/1.0\r\n"
-	crlf         = "\r\n"
-	hdrPreEnd    = len(hdrLine) - len(crlf)
-	statusHdr    = "Status"
-	descrHdr     = "Description"
-	noResponders = "503"
-	noMessages   = "404"
-	controlMsg   = "100"
-	statusLen    = 3 // e.g. 20x, 40x, 50x
+	hdrLine            = "NATS/1.0\r\n"
+	crlf               = "\r\n"
+	hdrPreEnd          = len(hdrLine) - len(crlf)
+	statusHdr          = "Status"
+	descrHdr           = "Description"
+	lastConsumerSeqHdr = "Nats-Last-Consumer"
+	lastStreamSeqHdr   = "Nats-Last-Stream"
+	noResponders       = "503"
+	noMessages         = "404"
+	controlMsg         = "100"
+	statusLen          = 3 // e.g. 20x, 40x, 50x
 )
 
 // decodeHeadersMsg will decode and headers.
@@ -3635,6 +3637,13 @@ func (s *Subscription) handleControlMessage(msg *Msg) (bool, error) {
 		if err != nil {
 			return isControl, err
 		}
+	} else {
+		s.mu.Lock()
+		jsi := s.jsi
+		jsi.dseq = 1
+		jsi.sseq = 1
+		jsi.last = time.Now()
+		s.mu.Unlock()
 	}
 	return isControl, nil
 }

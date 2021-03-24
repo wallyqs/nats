@@ -456,6 +456,11 @@ type jsSub struct {
 	pull     bool
 	durable  bool
 	attached bool
+
+	// track the latest sequence
+	dseq     int64
+	sseq     int64
+	last     time.Time
 }
 
 func (jsi *jsSub) unsubscribe(drainMode bool) error {
@@ -622,7 +627,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	if isPullMode {
 		sub = &Subscription{Subject: subj, conn: js.nc, typ: PullSubscription, jsi: &jsSub{js: js, pull: true}}
 	} else {
-		sub, err = js.nc.subscribe(deliver, queue, cb, ch, cb == nil, &jsSub{js: js})
+		sub, err = js.nc.subscribe(deliver, queue, cb, ch, cb == nil, &jsSub{js: js, hbInterval: o.cfg.Heartbeat })
 		if err != nil {
 			return nil, err
 		}
