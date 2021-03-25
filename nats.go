@@ -2389,7 +2389,7 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 		if m != nil && (max == 0 || delivered <= max) {
 			if jsi != nil {
 				// Process and skip flow control messages automatically.
-				isControl, _ := s.handleControlMessage(m)
+				isControl, _ := jsi.handleControlMessage(s, m)
 				if !isControl {
 					mcb(m)
 				}
@@ -2833,15 +2833,17 @@ func NewMsg(subject string) *Msg {
 }
 
 const (
-	hdrLine      = "NATS/1.0\r\n"
-	crlf         = "\r\n"
-	hdrPreEnd    = len(hdrLine) - len(crlf)
-	statusHdr    = "Status"
-	descrHdr     = "Description"
-	noResponders = "503"
-	noMessages   = "404"
-	controlMsg   = "100"
-	statusLen    = 3 // e.g. 20x, 40x, 50x
+	hdrLine            = "NATS/1.0\r\n"
+	crlf               = "\r\n"
+	hdrPreEnd          = len(hdrLine) - len(crlf)
+	statusHdr          = "Status"
+	descrHdr           = "Description"
+	lastConsumerSeqHdr = "Nats-Last-Consumer"
+	lastStreamSeqHdr   = "Nats-Last-Stream"
+	noResponders       = "503"
+	noMessages         = "404"
+	controlMsg         = "100"
+	statusLen          = 3 // e.g. 20x, 40x, 50x
 )
 
 // decodeHeadersMsg will decode and headers.
@@ -3630,9 +3632,45 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 	return nil
 }
 
-func (s *Subscription) handleControlMessage(msg *Msg) (bool, error) {
+// ErrConsumerSequenceMismatch represents an error where the consumer sequence.
+type ErrConsumerSequenceMismatch struct {
+	// StreamResumeSequence is the stream sequence from where the consumer
+	// should resume consuming from the stream.
+	StreamResumeSequence uint64
+}
+
+func (ecs *ErrConsumerSequenceMismatch) Error() string {
+	return fmt.Sprintf("nats: Sequence mismatch error, should restart consumer from stream sequence %d", ecs.StreamResumeSequence)
+}
+
+// handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
+func handleConsumerSequenceMismatch(sub *Subscription, seq uint64) {
+	sub.mu.Lock()
+	nc := sub.conn
+	sub.mu.Unlock()
+
+	nc.mu.Lock()
+	errCB := nc.Opts.AsyncErrorCB
+	if errCB != nil {
+		nc.ach.push(func() { errCB(nc, sub, &ErrConsumerSequenceMismatch{seq}) })
+	}
+	nc.mu.Unlock()
+}
+
+func (jsi *jsSub) handleControlMessage(s *Subscription, msg *Msg) (bool, error) {
 	isControl := len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
 	if !isControl {
+		// In case of using heartbeats, then snapshot the raw metadata sequences from a consumer.
+		if jsi.hbs {
+			var ctrl *controlMetadata
+			if cmeta := jsi.cmeta.Load(); cmeta == nil {
+				ctrl = &controlMetadata{}
+			} else {
+				ctrl = cmeta.(*controlMetadata)
+			}
+			ctrl.meta = msg.Reply
+			jsi.cmeta.Store(ctrl)
+		}
 		return isControl, nil
 	}
 
@@ -3642,13 +3680,38 @@ func (s *Subscription) handleControlMessage(msg *Msg) (bool, error) {
 		if err != nil {
 			return isControl, err
 		}
+	} else {
+		// Process heartbeat received, get latest control metadata if present.
+		var ctrl *controlMetadata
+		cmeta := jsi.cmeta.Load()
+		if cmeta == nil {
+			return isControl, nil
+		}
+
+		ctrl = cmeta.(*controlMetadata)
+		tokens, err := getMetadataFields(ctrl.meta)
+		if err != nil {
+			return isControl, err
+		}
+		// Consumer sequence
+		dseq := tokens[6]
+		ldseq := msg.Header.Get(lastConsumerSeqHdr)
+
+		// Detect consumer sequence mismatch and whether
+		// should restart the consumer.
+		if ldseq != dseq {
+			// Dispatch async error including the sequence
+			// from where the consumer could be restarted.
+			sseq := parseNum(tokens[5])
+			handleConsumerSequenceMismatch(s, uint64(sseq+1))
+		}
 	}
 	return isControl, nil
 }
 
 // processControlFlow checks whether it is a control message and
 // handles it automatically.
-func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg) (*Msg, error) {
+func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg, jsi *jsSub) (*Msg, error) {
 	// We will peek at the channel and return the next message
 	// that is not a control message or a timeout error.
 	var msg *Msg
@@ -3662,7 +3725,7 @@ func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg) (*Msg,
 			if err := s.processNextMsgDelivered(msg); err != nil {
 				return nil, err
 			}
-			isControl, err := s.handleControlMessage(msg)
+			isControl, err := jsi.handleControlMessage(s, msg)
 			if err != nil {
 				return nil, err
 			}
@@ -3710,7 +3773,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 			// JetStream Push consumers may get extra status messages
 			// that the client will process automatically.
 			if jsi != nil {
-				isControl, err := s.handleControlMessage(msg)
+				isControl, err := jsi.handleControlMessage(s, msg)
 				if err != nil {
 					return nil, err
 				}
@@ -3733,7 +3796,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	if jsi != nil {
 		// Skip any control messages that may have been delivered
 		// until there is a valid message or a timeout error.
-		msg, err = s.processControlFlow(t, mch)
+		msg, err = s.processControlFlow(t, mch, jsi)
 		if err != nil {
 			return nil, err
 		}

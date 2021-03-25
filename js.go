@@ -456,6 +456,20 @@ type jsSub struct {
 	pull     bool
 	durable  bool
 	attached bool
+
+	// Heartbeats handling from push consumers.
+	hbs bool
+
+	// cmeta is holds metadata from a push consumer
+	// for when heartbeats are enabled.
+	cmeta atomic.Value
+}
+
+// controlMetadata is metadata used to be able to detect sequence mismatch
+// errors in push based consumers that have heartbeats enabled.
+type controlMetadata struct {
+	meta string
+	last time.Time
 }
 
 func (jsi *jsSub) unsubscribe(drainMode bool) error {
@@ -537,6 +551,7 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 
 	isPullMode := ch == nil && cb == nil
 	badPullAck := o.cfg.AckPolicy == AckNonePolicy || o.cfg.AckPolicy == AckAllPolicy
+	hasHeartbeats := o.cfg.Heartbeat > 0
 	if isPullMode && badPullAck {
 		return nil, fmt.Errorf("invalid ack mode for pull consumers: %s", o.cfg.AckPolicy)
 	}
@@ -620,9 +635,9 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	}
 
 	if isPullMode {
-		sub = &Subscription{Subject: subj, conn: js.nc, typ: PullSubscription, jsi: &jsSub{js: js, pull: true}}
+		sub = &Subscription{Subject: subj, conn: js.nc, typ: PullSubscription, jsi: &jsSub{js: js, pull: isPullMode}}
 	} else {
-		sub, err = js.nc.subscribe(deliver, queue, cb, ch, cb == nil, &jsSub{js: js})
+		sub, err = js.nc.subscribe(deliver, queue, cb, ch, cb == nil, &jsSub{js: js, hbs: hasHeartbeats})
 		if err != nil {
 			return nil, err
 		}
@@ -1340,18 +1355,12 @@ type MsgMetaData struct {
 	StreamName string
 }
 
-// MetaData retrieves the metadata from a JetStream message.
-func (m *Msg) MetaData() (*MsgMetaData, error) {
-	if _, _, err := m.checkReply(); err != nil {
-		return nil, err
-	}
-
+func getMetadataFields(subject string) ([]string, error) {
 	const expectedTokens = 9
 	const btsep = '.'
 
 	tsa := [expectedTokens]string{}
 	start, tokens := 0, tsa[:0]
-	subject := m.Reply
 	for i := 0; i < len(subject); i++ {
 		if subject[i] == btsep {
 			tokens = append(tokens, subject[start:i])
@@ -1361,6 +1370,19 @@ func (m *Msg) MetaData() (*MsgMetaData, error) {
 	tokens = append(tokens, subject[start:])
 	if len(tokens) != expectedTokens || tokens[0] != "$JS" || tokens[1] != "ACK" {
 		return nil, ErrNotJSMessage
+	}
+	return tokens, nil
+}
+
+// MetaData retrieves the metadata from a JetStream message.
+func (m *Msg) MetaData() (*MsgMetaData, error) {
+	if _, _, err := m.checkReply(); err != nil {
+		return nil, err
+	}
+
+	tokens, err := getMetadataFields(m.Reply)
+	if err != nil {
+		return nil, err
 	}
 
 	meta := &MsgMetaData{

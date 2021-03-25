@@ -110,7 +110,7 @@ func (nc *Conn) oldRequestWithContext(ctx context.Context, subj string, hdr, dat
 	return s.NextMsgWithContext(ctx)
 }
 
-func (s *Subscription) processControlFlowCtx(ctx context.Context, mch <-chan *Msg) (*Msg, error) {
+func (s *Subscription) processControlFlowCtx(ctx context.Context, mch <-chan *Msg, jsi *jsSub) (*Msg, error) {
 	// We will peek at the channel and return the next message
 	// that is not a control message or a timeout error.
 	var msg *Msg
@@ -124,7 +124,7 @@ func (s *Subscription) processControlFlowCtx(ctx context.Context, mch <-chan *Ms
 			if err := s.processNextMsgDelivered(msg); err != nil {
 				return nil, err
 			}
-			isControl, err := s.handleControlMessage(msg)
+			isControl, err := jsi.handleControlMessage(s, msg)
 			if err != nil {
 				return nil, err
 			}
@@ -178,7 +178,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 			// JetStream Push consumers may get extra status messages
 			// that the client will process automatically.
 			if jsi != nil {
-				isControl, err := s.handleControlMessage(msg)
+				isControl, err := jsi.handleControlMessage(s, msg)
 				if err != nil {
 					return nil, err
 				}
@@ -196,7 +196,7 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	if jsi != nil {
 		// Skip any control messages that may have been delivered
 		// until there is a valid message or a timeout error.
-		msg, err = s.processControlFlowCtx(ctx, mch)
+		msg, err = s.processControlFlowCtx(ctx, mch, jsi)
 		if err != nil {
 			return nil, err
 		}
