@@ -2389,8 +2389,12 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 		if m != nil && (max == 0 || delivered <= max) {
 			if jsi != nil {
 				// Process and skip flow control messages automatically.
-				isControl, _ := s.handleControlMessage(m)
-				if !isControl {
+				if isControlMessage(m) {
+					jsi.handleControlMessage(s, m)
+				} else {
+					if jsi.hbs {
+						jsi.trackSequences(m)
+					}
 					mcb(m)
 				}
 			} else {
@@ -2833,15 +2837,17 @@ func NewMsg(subject string) *Msg {
 }
 
 const (
-	hdrLine      = "NATS/1.0\r\n"
-	crlf         = "\r\n"
-	hdrPreEnd    = len(hdrLine) - len(crlf)
-	statusHdr    = "Status"
-	descrHdr     = "Description"
-	noResponders = "503"
-	noMessages   = "404"
-	controlMsg   = "100"
-	statusLen    = 3 // e.g. 20x, 40x, 50x
+	hdrLine            = "NATS/1.0\r\n"
+	crlf               = "\r\n"
+	hdrPreEnd          = len(hdrLine) - len(crlf)
+	statusHdr          = "Status"
+	descrHdr           = "Description"
+	lastConsumerSeqHdr = "Nats-Last-Consumer"
+	lastStreamSeqHdr   = "Nats-Last-Stream"
+	noResponders       = "503"
+	noMessages         = "404"
+	controlMsg         = "100"
+	statusLen          = 3 // e.g. 20x, 40x, 50x
 )
 
 // decodeHeadersMsg will decode and headers.
@@ -3630,25 +3636,102 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 	return nil
 }
 
-func (s *Subscription) handleControlMessage(msg *Msg) (bool, error) {
-	isControl := len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
-	if !isControl {
-		return isControl, nil
-	}
+// ErrConsumerSequenceMismatch represents an error from a consumer
+// that received a Heartbeat including sequence different to the
+// one expected from the view of the client.
+type ErrConsumerSequenceMismatch struct {
+	// StreamResumeSequence is the stream sequence from where the consumer
+	// should resume consuming from the stream.
+	StreamResumeSequence uint64
 
+	// ConsumerSequence is the sequence of the consumer that is behind.
+	ConsumerSequence int64
+
+	// LastConsumerSequence is the sequence of the consumer when the heartbeat
+	// was received.
+	LastConsumerSequence int64
+}
+
+func (ecs *ErrConsumerSequenceMismatch) Error() string {
+	return fmt.Sprintf("nats: sequence mismatch for consumer (gap=%d), should restart from stream sequence %d",
+		ecs.LastConsumerSequence-ecs.ConsumerSequence,
+		ecs.StreamResumeSequence,
+	)
+}
+
+// handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
+func handleConsumerSequenceMismatch(sub *Subscription, err error) {
+	sub.mu.Lock()
+	nc := sub.conn
+	sub.mu.Unlock()
+
+	nc.mu.Lock()
+	errCB := nc.Opts.AsyncErrorCB
+	if errCB != nil {
+		nc.ach.push(func() { errCB(nc, sub, err) })
+	}
+	nc.mu.Unlock()
+}
+
+func isControlMessage(msg *Msg) bool {
+	return len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
+}
+
+func (jsi *jsSub) trackSequences(msg *Msg) {
+	var ctrl *controlMetadata
+	if cmeta := jsi.cmeta.Load(); cmeta == nil {
+		ctrl = &controlMetadata{}
+	} else {
+		ctrl = cmeta.(*controlMetadata)
+	}
+	ctrl.meta = msg.Reply
+	jsi.cmeta.Store(ctrl)
+}
+
+func (jsi *jsSub) handleControlMessage(s *Subscription, msg *Msg) error {
 	// If it is a flow control message then have to ack.
 	if msg.Reply != "" {
 		err := msg.Respond(nil)
 		if err != nil {
-			return isControl, err
+			return err
+		}
+	} else if jsi.hbs {
+		// Process heartbeat received, get latest control metadata if present.
+		var ctrl *controlMetadata
+		cmeta := jsi.cmeta.Load()
+		if cmeta == nil {
+			return nil
+		}
+
+		ctrl = cmeta.(*controlMetadata)
+		tokens, err := getMetadataFields(ctrl.meta)
+		if err != nil {
+			return err
+		}
+		// Consumer sequence
+		dseq := tokens[6]
+		ldseq := msg.Header.Get(lastConsumerSeqHdr)
+
+		// Detect consumer sequence mismatch and whether
+		// should restart the consumer.
+		if ldseq != dseq {
+			// Dispatch async error including details such as
+			// from where the consumer could be restarted.
+			sseq := parseNum(tokens[5])
+			ecs := &ErrConsumerSequenceMismatch{
+				StreamResumeSequence: uint64(sseq + 1),
+				ConsumerSequence:     parseNum(dseq),
+				LastConsumerSequence: parseNum(ldseq),
+			}
+			handleConsumerSequenceMismatch(s, ecs)
 		}
 	}
-	return isControl, nil
+	return nil
 }
 
 // processControlFlow checks whether it is a control message and
 // handles it automatically.
-func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg) (*Msg, error) {
+func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg, jsi *jsSub) (*Msg, error) {
 	// We will peek at the channel and return the next message
 	// that is not a control message or a timeout error.
 	var msg *Msg
@@ -3662,11 +3745,17 @@ func (s *Subscription) processControlFlow(t *time.Timer, mch <-chan *Msg) (*Msg,
 			if err := s.processNextMsgDelivered(msg); err != nil {
 				return nil, err
 			}
-			isControl, err := s.handleControlMessage(msg)
-			if err != nil {
-				return nil, err
-			}
-			if !isControl {
+			if isControlMessage(msg) {
+				err := jsi.handleControlMessage(s, msg)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				// In case of using heartbeats, then snapshot the raw metadata
+				// sequences from a consumer.
+				if jsi.hbs {
+					jsi.trackSequences(msg)
+				}
 				return msg, nil
 			}
 		case <-t.C:
@@ -3710,13 +3799,15 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 			// JetStream Push consumers may get extra status messages
 			// that the client will process automatically.
 			if jsi != nil {
-				isControl, err := s.handleControlMessage(msg)
-				if err != nil {
-					return nil, err
-				}
-				if isControl {
-					// Check for following messages using a timer.
+				if isControlMessage(msg) {
+					err := jsi.handleControlMessage(s, msg)
+					if err != nil {
+						return nil, err
+					}
+					// Skip and wait for next message.
 					break
+				} else if jsi.hbs {
+					jsi.trackSequences(msg)
 				}
 			}
 			return msg, nil
@@ -3733,7 +3824,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	if jsi != nil {
 		// Skip any control messages that may have been delivered
 		// until there is a valid message or a timeout error.
-		msg, err = s.processControlFlow(t, mch)
+		msg, err = s.processControlFlow(t, mch, jsi)
 		if err != nil {
 			return nil, err
 		}
