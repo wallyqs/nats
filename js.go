@@ -518,6 +518,11 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	if isPullMode && badPullAck {
 		return nil, fmt.Errorf("invalid ack mode for pull consumers: %s", o.cfg.AckPolicy)
 	}
+	consumerBound := o.consumer != _EMPTY_
+	hasDurable := o.cfg.Durable != _EMPTY_
+	if consumerBound && hasDurable {
+		return nil, fmt.Errorf("nats: cannot use of both explicit consumer name and durable name")
+	}
 
 	var (
 		err          error
@@ -525,8 +530,8 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 		ccfg         *ConsumerConfig
 		deliver      string
 		attached     bool
-		stream       = o.stream
-		consumer     = o.consumer
+		stream       string
+		consumer     string
 	)
 
 	// Find the stream mapped to the subject if not bound to a stream already.
@@ -542,38 +547,44 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	// With an explicit durable name, then can lookup
 	// the consumer to which it should be attaching to.
 	var info *ConsumerInfo
-	consumer = o.cfg.Durable
-	if consumer != _EMPTY_ {
-		// Only create in case there is no consumer already.
-		info, err = js.ConsumerInfo(stream, consumer)
-		if err != nil && err.Error() != `consumer not found` {
-			return nil, err
-		}
-	}
-
-	if info != nil {
-		// Attach using the found consumer config.
-		ccfg = &info.Config
-		attached = true
-
-		// Make sure this new subject matches or is a subset.
-		if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
-			return nil, ErrSubjectMismatch
-		}
-
-		if ccfg.DeliverSubject != _EMPTY_ {
-			deliver = ccfg.DeliverSubject
-		} else {
-			deliver = NewInbox()
-		}
+	if consumerBound {
+		// A consumer has been bound with a name explicitly,
+		// so a lookup will not occur.
+		consumer = o.consumer
+		deliver = subj
 	} else {
-		shouldCreate = true
-		deliver = NewInbox()
-		if !isPullMode {
-			cfg.DeliverSubject = deliver
+		if hasDurable {
+			// Only create in case there is no consumer already.
+			consumer = o.cfg.Durable
+			info, err = js.ConsumerInfo(stream, consumer)
+			if err != nil && err.Error() != `consumer not found` {
+				return nil, err
+			}
 		}
-		// Do filtering always, server will clear as needed.
-		cfg.FilterSubject = subj
+		if info != nil {
+			// Attach using the found consumer config.
+			ccfg = &info.Config
+			attached = true
+
+			// Make sure this new subject matches or is a subset.
+			if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
+				return nil, ErrSubjectMismatch
+			}
+
+			if ccfg.DeliverSubject != _EMPTY_ {
+				deliver = ccfg.DeliverSubject
+			} else {
+				deliver = NewInbox()
+			}
+		} else {
+			shouldCreate = true
+			deliver = NewInbox()
+			if !isPullMode {
+				cfg.DeliverSubject = deliver
+			}
+			// Do filtering always, server will clear as needed.
+			cfg.FilterSubject = subj
+		}
 	}
 
 	var sub *Subscription
@@ -653,7 +664,12 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, opts []
 	} else {
 		sub.jsi.stream = stream
 		sub.jsi.consumer = consumer
-		sub.jsi.deliver = ccfg.DeliverSubject
+
+		if ccfg != nil {
+			sub.jsi.deliver = ccfg.DeliverSubject
+		} else {
+			sub.jsi.deliver = deliver
+		}
 	}
 	sub.jsi.attached = attached
 
@@ -835,6 +851,14 @@ func BindStream(name string) SubOpt {
 	})
 }
 
+// BindConsumer binds a subscription to consumer based on name.
+func BindConsumer(name string) SubOpt {
+	return subOptFn(func(opts *subOpts) error {
+		opts.consumer = name
+		return nil
+	})
+}
+
 func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 	sub.mu.Lock()
 	// TODO(dlc) - Better way to mark especially if we attach.
@@ -842,8 +866,6 @@ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 		sub.mu.Unlock()
 		return nil, ErrTypeSubscription
 	}
-
-	// Consumer info lookup should fail if in direct mode.
 	js := sub.jsi.js
 	stream, consumer := sub.jsi.stream, sub.jsi.consumer
 	sub.mu.Unlock()
