@@ -942,6 +942,82 @@ func PullMaxWaiting(n int) SubOpt {
 	})
 }
 
+func (s *Subscription) getNextMsg(timeout *time.Duration, doneCh <-chan struct{}) (*Msg, error) {
+	s.mu.Lock()
+	err := s.validateNextMsgState()
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+
+	// snapshot
+	mch := s.mch
+	jsi := s.jsi
+	s.mu.Unlock()
+
+	var ok bool
+	var msg *Msg
+
+	// If something is available right away, let's optimize that case.
+	select {
+	case msg, ok = <-mch:
+		if !ok {
+			return nil, s.getNextMsgErr()
+		}
+		if err := s.processNextMsgDelivered(msg); err != nil {
+			return nil, err
+		} else {
+			// JetStream Push consumers may get extra status messages
+			// that the client will process automatically.
+			if jsi != nil {
+				if isControlMessage(msg) {
+					if err := jsi.handleControlMessage(s, msg); err != nil {
+						return nil, err
+					}
+					// Skip and wait for next message.
+					break
+				} else if jsi.hbs {
+					jsi.trackSequences(msg)
+				}
+			}
+			return msg, nil
+		}
+	default:
+	}
+
+	var tc <-chan time.Time
+	if timeout != nil {
+		t := globalTimerPool.Get(*timeout)
+		defer globalTimerPool.Put(t)
+		tc = t.C
+	}
+	if jsi != nil {
+		// Skip any control messages that may have been delivered
+		// until there is a valid message or a timeout error.
+		msg, err = s.processControlFlow(mch, jsi, tc, doneCh)
+		if err != nil {
+			return nil, err
+		}
+		return msg, nil
+	}
+
+	select {
+	case msg, ok = <-mch:
+		if !ok {
+			return nil, s.getNextMsgErr()
+		}
+		if err := s.processNextMsgDelivered(msg); err != nil {
+			return nil, err
+		}
+	case <-tc:
+		return nil, ErrTimeout
+	case <-doneCh:
+		return nil, ErrTimeout
+	}
+
+	return msg, nil
+}
+
 var errNoMessages = errors.New("nats: no messages")
 
 // Fetch pulls a batch of messages from a stream for a pull consumer.

@@ -123,73 +123,12 @@ func (s *Subscription) NextMsgWithContext(ctx context.Context) (*Msg, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-
-	s.mu.Lock()
-	err := s.validateNextMsgState()
+	msg, err := s.getNextMsg(nil, ctx.Done())
 	if err != nil {
-		s.mu.Unlock()
+		if err == ErrTimeout {
+			err = ctx.Err()
+		}
 		return nil, err
-	}
-
-	// snapshot
-	mch := s.mch
-	jsi := s.jsi
-	s.mu.Unlock()
-
-	var ok bool
-	var msg *Msg
-
-	// If something is available right away, let's optimize that case.
-	select {
-	case msg, ok = <-mch:
-		if !ok {
-			return nil, s.getNextMsgErr()
-		}
-		if err := s.processNextMsgDelivered(msg); err != nil {
-			return nil, err
-		} else {
-			// JetStream Push consumers may get extra status messages
-			// that the client will process automatically.
-			if jsi != nil {
-				if isControlMessage(msg) {
-					if err := jsi.handleControlMessage(s, msg); err != nil {
-						return nil, err
-					}
-					// Skip and wait for next message.
-					break
-				} else if jsi.hbs {
-					jsi.trackSequences(msg)
-				}
-				return msg, nil
-			}
-			return msg, nil
-		}
-	default:
-	}
-
-	if jsi != nil {
-		// Skip any control messages that may have been delivered
-		// until there is a valid message or a timeout error.
-		msg, err = s.processControlFlow(mch, jsi, nil, ctx.Done())
-		if err != nil {
-			if err == ErrTimeout {
-				err = ctx.Err()
-			}
-			return nil, err
-		}
-		return msg, nil
-	}
-
-	select {
-	case msg, ok = <-mch:
-		if !ok {
-			return nil, s.getNextMsgErr()
-		}
-		if err := s.processNextMsgDelivered(msg); err != nil {
-			return nil, err
-		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 
 	return msg, nil
