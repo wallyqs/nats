@@ -299,12 +299,12 @@ func (pa *pubAck) Duplicate() bool {
 }
 
 func (pa *pubAck) Ok() <-chan PubAck {
-	// Always blocks since done.
+	// Always blocks since done on synchronous calls.
 	return nil
 }
 
 func (pa *pubAck) Err() <-chan error {
-	// Always blocks since done.
+	// Always blocks since done on synchronous calls.
 	return nil
 }
 
@@ -420,10 +420,11 @@ func (paf *pubAckFuture) Ok() <-chan PubAck {
 
 	if paf.doneCh == nil {
 		paf.doneCh = make(chan PubAck, 1)
+		if paf.pa != nil {
+			paf.doneCh <- paf.pa
+		}
 	}
-	if paf.pa != nil {
-		paf.doneCh <- paf.pa
-	}
+
 	return paf.doneCh
 }
 
@@ -433,12 +434,40 @@ func (paf *pubAckFuture) Err() <-chan error {
 
 	if paf.errCh == nil {
 		paf.errCh = make(chan error, 1)
+		if paf.err != nil {
+			paf.errCh <- paf.err
+		}
 	}
-	if paf.err != nil {
-		paf.errCh <- paf.err
-	}
+
 	return paf.errCh
 }
+
+// func (paf *pubAckFuture) Ok() <-chan PubAck {
+// 	paf.js.mu.Lock()
+// 	defer paf.js.mu.Unlock()
+// 
+// 	if paf.doneCh == nil {
+// 		paf.doneCh = make(chan PubAck, 1)
+// 	}
+// 	if paf.pa != nil && len(paf.doneCh) == 0 {
+// 		paf.doneCh <- paf.pa
+// 	}
+// 	return paf.doneCh
+// }
+
+// func (paf *pubAckFuture) Err() <-chan error {
+// 	paf.js.mu.Lock()
+// 	defer paf.js.mu.Unlock()
+// 
+// 	if paf.errCh == nil {
+// 		paf.errCh = make(chan error, 1)
+// 	}
+// 	if paf.err != nil && len(paf.errCh) == 0 {
+// 		fmt.Println("sending but no one receiving", len(paf.errCh), paf.err)
+// 		paf.errCh <- paf.err
+// 	}
+// 	return paf.errCh
+// }
 
 func (paf *pubAckFuture) Msg() *Msg {
 	paf.js.mu.RLock()
@@ -558,6 +587,8 @@ func (js *js) handleAsyncReply(m *Msg) {
 
 	doErr := func(err error) {
 		paf.err = err
+
+		// Send the error if there are someone consumers.
 		if paf.errCh != nil {
 			paf.errCh <- paf.err
 		}
@@ -595,6 +626,7 @@ func (js *js) handleAsyncReply(m *Msg) {
 		duplicate: pa.Duplicate,
 	}
 	if paf.doneCh != nil {
+		// TODO: Should we close the errCh in case it is present?
 		paf.doneCh <- paf.pa
 	}
 	js.mu.Unlock()

@@ -4764,6 +4764,48 @@ func TestJetStreamPublishAsync(t *testing.T) {
 		t.Fatalf("Did not receive an error in time")
 	}
 
+	// Will only be received once.
+	ech := paf.Err()
+	t.Logf("Consuming again from err ch: %+v", ech == nil)
+	t.Logf("Consuming again from err ch: %+v", len(paf.Err()))
+	t.Logf("Consuming again from err ch: %+v", len(ech))
+
+	select {
+	case e := <-ech:
+		t.Logf("Consuming again from err ch: %+v", e)
+	default:
+		t.Logf("Not ready to receive")
+	}
+	t.Logf("Consuming again from err ch: %+v", len(paf.Err()))
+	t.Logf("Consuming again from err ch: %+v", len(ech))
+	
+	// go func(){
+	// 	select {
+	// 	case err := <- paf.Err():
+	// 		t.Logf("A: Result: %+v", err)
+	// 	}
+	// }()
+
+	// go func(){
+	// 	select {
+	// 	case err := <- paf.Err():
+	// 		t.Logf("B: Result: %+v", err)
+	// 	}
+	// }()
+
+
+	// go func(){
+	// 	// These are both the same channel.
+	// 	first := paf.Err()
+	// 	second := paf.Err()
+	// 	select {
+	// 	case err := <- first:
+	// 		t.Logf("AA: Result: %+v", err)
+	// 	case err := <- second:
+	// 		t.Logf("BB: Result: %+v", err)
+	// 	}
+	// }()
+
 	// Now create a stream and expect a PubAck from <-OK().
 	if _, err := js.AddStream(&nats.StreamConfig{Name: "TEST"}); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -4784,6 +4826,21 @@ func TestJetStreamPublishAsync(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("Did not receive a PubAck in time")
 	}
+
+	// // go func(){
+	// 	// These are both the same channel.
+	// 	a := paf.Ok()
+	// 	b := paf.Ok()
+	// 	select {
+	// 	case err := <- a:
+	// 		t.Logf("a: Result: %+v", err)
+	// 	case err := <- b:
+	// 		t.Logf("b: Result: %+v", err)
+	// 	default:
+	// 		t.Logf("Done")
+	// 	}
+	// // }()
+
 
 	errCh := make(chan error, 1)
 
