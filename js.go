@@ -90,18 +90,18 @@ const (
 // JetStream is the public interface for JetStream.
 type JetStream interface {
 	// Publish publishes a message to JetStream.
-	Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
+	Publish(subj string, data []byte, opts ...PubOpt) (PubAck, error)
 
 	// PublishMsg publishes a Msg to JetStream.
-	PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error)
+	PublishMsg(m *Msg, opts ...PubOpt) (PubAck, error)
 
 	// PublishAsync publishes a message to JetStream and returns a PubAckFuture.
 	// The data should not be changed until the PubAckFuture has been processed.
-	PublishAsync(subj string, data []byte, opts ...PubOpt) (*PubAckFuture, error)
+	PublishAsync(subj string, data []byte, opts ...PubOpt) (PubAck, error)
 
 	// PublishMsgAsync publishes a Msg to JetStream and returms a PubAckFuture.
 	// The message should not be changed until the PubAckFuture has been processed.
-	PublishMsgAsync(m *Msg, opts ...PubOpt) (*PubAckFuture, error)
+	PublishMsgAsync(m *Msg, opts ...PubOpt) (PubAck, error)
 
 	// PublishAsyncPending returns the number of async publishes outstanding for this context.
 	PublishAsyncPending() int
@@ -143,7 +143,7 @@ type js struct {
 	mu   sync.RWMutex
 	rpre string
 	rsub *Subscription
-	pafs map[string]*PubAckFuture
+	pafs map[string]*pubAckFuture
 	stc  chan struct{}
 	dch  chan struct{}
 }
@@ -274,14 +274,53 @@ type pubOpts struct {
 // pubAckResponse is the ack response from the JetStream API when publishing a message.
 type pubAckResponse struct {
 	apiResponse
-	*PubAck
-}
-
-// PubAck is an ack received after successfully publishing a message.
-type PubAck struct {
 	Stream    string `json:"stream"`
 	Sequence  uint64 `json:"seq"`
 	Duplicate bool   `json:"duplicate,omitempty"`
+}
+
+// PubAck is an ack received after successfully publishing a message.
+type pubAck struct {
+	stream    string
+	sequence  uint64
+	duplicate bool
+}
+
+func (pa *pubAck) Stream() string {
+	return pa.stream
+}
+
+func (pa *pubAck) Sequence() uint64 {
+	return pa.sequence
+}
+
+func (pa *pubAck) Duplicate() bool {
+	return pa.duplicate
+}
+
+func (pa *pubAck) Ok() <-chan PubAck {
+	// Always blocks since done.
+	return nil
+}
+
+func (pa *pubAck) Err() <-chan error {
+	// Always blocks since done.
+	return nil
+}
+
+func (pa *pubAck) Msg() *Msg {
+	// TODO: should include message?
+	return nil
+}
+
+// PubAck...
+type PubAck interface {
+	Stream() string
+	Sequence() uint64
+	Duplicate() bool
+	Ok() <-chan PubAck
+	Err() <-chan error
+	Msg() *Msg
 }
 
 // Headers for published messages.
@@ -293,7 +332,7 @@ const (
 )
 
 // PublishMsg publishes a Msg to a stream from JetStream.
-func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
+func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (PubAck, error) {
 	var o pubOpts
 	if len(opts) > 0 {
 		if m.Header == nil {
@@ -341,41 +380,46 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		}
 		return nil, err
 	}
-	var pa pubAckResponse
+	var pa *pubAckResponse
 	if err := json.Unmarshal(resp.Data, &pa); err != nil {
 		return nil, ErrInvalidJSAck
 	}
 	if pa.Error != nil {
 		return nil, fmt.Errorf("nats: %s", pa.Error.Description)
 	}
-	if pa.PubAck == nil || pa.PubAck.Stream == _EMPTY_ {
+	if pa == nil || pa.Stream == _EMPTY_ {
 		return nil, ErrInvalidJSAck
 	}
-	return pa.PubAck, nil
+	return &pubAck{
+		stream:    pa.Stream,
+		sequence:  pa.Sequence,
+		duplicate: pa.Duplicate,
+	}, nil
 }
 
 // Publish publishes a message to a stream from JetStream.
-func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error) {
+func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (PubAck, error) {
 	return js.PublishMsg(&Msg{Subject: subj, Data: data}, opts...)
 }
 
 // PubAckFuture is a future for a PubAck.
-type PubAckFuture struct {
+type pubAckFuture struct {
+	pubAck
 	js     *js
 	msg    *Msg
-	pa     *PubAck
+	pa     *pubAck
 	st     time.Time
 	err    error
 	errCh  chan error
-	doneCh chan *PubAck
+	doneCh chan PubAck
 }
 
-func (paf *PubAckFuture) Ok() <-chan *PubAck {
+func (paf *pubAckFuture) Ok() <-chan PubAck {
 	paf.js.mu.Lock()
 	defer paf.js.mu.Unlock()
 
 	if paf.doneCh == nil {
-		paf.doneCh = make(chan *PubAck, 1)
+		paf.doneCh = make(chan PubAck, 1)
 	}
 	if paf.pa != nil {
 		paf.doneCh <- paf.pa
@@ -383,7 +427,7 @@ func (paf *PubAckFuture) Ok() <-chan *PubAck {
 	return paf.doneCh
 }
 
-func (paf *PubAckFuture) Err() <-chan error {
+func (paf *pubAckFuture) Err() <-chan error {
 	paf.js.mu.Lock()
 	defer paf.js.mu.Unlock()
 
@@ -396,7 +440,7 @@ func (paf *PubAckFuture) Err() <-chan error {
 	return paf.errCh
 }
 
-func (paf *PubAckFuture) Msg() *Msg {
+func (paf *pubAckFuture) Msg() *Msg {
 	paf.js.mu.RLock()
 	defer paf.js.mu.RUnlock()
 	return paf.msg
@@ -438,10 +482,10 @@ func (js *js) newAsyncReply() string {
 }
 
 // registerPAF will register for a PubAckFuture.
-func (js *js) registerPAF(id string, paf *PubAckFuture) (int, int) {
+func (js *js) registerPAF(id string, paf *pubAckFuture) (int, int) {
 	js.mu.Lock()
 	if js.pafs == nil {
-		js.pafs = make(map[string]*PubAckFuture)
+		js.pafs = make(map[string]*pubAckFuture)
 	}
 	paf.js = js
 	js.pafs[id] = paf
@@ -452,7 +496,7 @@ func (js *js) registerPAF(id string, paf *PubAckFuture) (int, int) {
 }
 
 // Lock should be held.
-func (js *js) getPAF(id string) *PubAckFuture {
+func (js *js) getPAF(id string) *pubAckFuture {
 	if js.pafs == nil {
 		return nil
 	}
@@ -530,7 +574,7 @@ func (js *js) handleAsyncReply(m *Msg) {
 		return
 	}
 
-	var pa pubAckResponse
+	var pa *pubAckResponse
 	if err := json.Unmarshal(m.Data, &pa); err != nil {
 		doErr(ErrInvalidJSAck)
 		return
@@ -539,13 +583,17 @@ func (js *js) handleAsyncReply(m *Msg) {
 		doErr(fmt.Errorf("nats: %s", pa.Error.Description))
 		return
 	}
-	if pa.PubAck == nil || pa.PubAck.Stream == _EMPTY_ {
+	if pa == nil || pa.Stream == _EMPTY_ {
 		doErr(ErrInvalidJSAck)
 		return
 	}
 
 	// So here we have received a proper puback.
-	paf.pa = pa.PubAck
+	paf.pa = &pubAck{
+		stream:    pa.Stream,
+		sequence:  pa.Sequence,
+		duplicate: pa.Duplicate,
+	}
 	if paf.doneCh != nil {
 		paf.doneCh <- paf.pa
 	}
@@ -577,11 +625,11 @@ func PublishAsyncMaxPending(max int) JSOpt {
 }
 
 // PublishAsync publishes a message to JetStream and returns a PubAckFuture
-func (js *js) PublishAsync(subj string, data []byte, opts ...PubOpt) (*PubAckFuture, error) {
+func (js *js) PublishAsync(subj string, data []byte, opts ...PubOpt) (PubAck, error) {
 	return js.PublishMsgAsync(&Msg{Subject: subj, Data: data}, opts...)
 }
 
-func (js *js) PublishMsgAsync(m *Msg, opts ...PubOpt) (*PubAckFuture, error) {
+func (js *js) PublishMsgAsync(m *Msg, opts ...PubOpt) (PubAck, error) {
 	var o pubOpts
 	if len(opts) > 0 {
 		if m.Header == nil {
@@ -622,7 +670,7 @@ func (js *js) PublishMsgAsync(m *Msg, opts ...PubOpt) (*PubAckFuture, error) {
 		return nil, errors.New("nats: error creating async reply handler")
 	}
 	id := m.Reply[aReplyPreLen:]
-	paf := &PubAckFuture{msg: m, st: time.Now()}
+	paf := &pubAckFuture{msg: m, st: time.Now()}
 	numPending, maxPending := js.registerPAF(id, paf)
 
 	if maxPending > 0 && numPending >= maxPending {

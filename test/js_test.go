@@ -123,18 +123,18 @@ func TestJetStreamPublish(t *testing.T) {
 		t.Fatalf("stream lookup failed: %v", err)
 	}
 
-	var pa *nats.PubAck
+	var pa nats.PubAck
 	expect := func(seq, nmsgs uint64) {
 		t.Helper()
 		if seq > 0 && pa == nil {
 			t.Fatalf("Missing pubAck to test sequence %d", seq)
 		}
 		if pa != nil {
-			if pa.Stream != "TEST" {
-				t.Fatalf("Wrong stream name, expected %q, got %q", "TEST", pa.Stream)
+			if pa.Stream() != "TEST" {
+				t.Fatalf("Wrong stream name, expected %q, got %q", "TEST", pa.Stream())
 			}
-			if seq > 0 && pa.Sequence != seq {
-				t.Fatalf("Wrong stream sequence, expected %d, got %d", seq, pa.Sequence)
+			if seq > 0 && pa.Sequence() != seq {
+				t.Fatalf("Wrong stream sequence, expected %d, got %d", seq, pa.Sequence())
 			}
 		}
 
@@ -181,10 +181,10 @@ func TestJetStreamPublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected publish error: %v", err)
 	}
-	if pa.Sequence != 2 {
-		t.Fatalf("Expected sequence of 2, got %d", pa.Sequence)
+	if pa.Sequence() != 2 {
+		t.Fatalf("Expected sequence of 2, got %d", pa.Sequence())
 	}
-	if !pa.Duplicate {
+	if !pa.Duplicate() {
 		t.Fatalf("Expected duplicate to be set")
 	}
 	expect(2, 2)
@@ -4776,7 +4776,7 @@ func TestJetStreamPublishAsync(t *testing.T) {
 
 	select {
 	case pa := <-paf.Ok():
-		if pa.Stream != "TEST" || pa.Sequence != 1 {
+		if pa.Stream() != "TEST" || pa.Sequence() != 1 {
 			t.Fatalf("Bad PubAck: %+v", pa)
 		}
 	case err := <-paf.Err():
