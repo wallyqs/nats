@@ -96,11 +96,11 @@ type JetStream interface {
 	PublishMsg(m *Msg, opts ...PubOpt) (PubAck, error)
 
 	// PublishAsync publishes a message to JetStream and returns a PubAckFuture.
-	// The data should not be changed until the PubAckFuture has been processed.
+	// The data should not be changed until the PubAck has been processed.
 	PublishAsync(subj string, data []byte, opts ...PubOpt) (PubAck, error)
 
 	// PublishMsgAsync publishes a Msg to JetStream and returms a PubAckFuture.
-	// The message should not be changed until the PubAckFuture has been processed.
+	// The message should not be changed until the PubAck has been processed.
 	PublishMsgAsync(m *Msg, opts ...PubOpt) (PubAck, error)
 
 	// PublishAsyncPending returns the number of async publishes outstanding for this context.
@@ -299,12 +299,12 @@ func (pa *pubAck) Duplicate() bool {
 }
 
 func (pa *pubAck) Ok() <-chan PubAck {
-	// Always blocks since done.
+	// Always blocks since done on synchronous calls.
 	return nil
 }
 
 func (pa *pubAck) Err() <-chan error {
-	// Always blocks since done.
+	// Always blocks since done on synchronous calls.
 	return nil
 }
 
@@ -313,7 +313,11 @@ func (pa *pubAck) Msg() *Msg {
 	return nil
 }
 
-// PubAck...
+func (pa *pubAck) Result() (PubAck, error) {
+	return pa, nil
+}
+
+// PubAck is the ack from a publish.
 type PubAck interface {
 	Stream() string
 	Sequence() uint64
@@ -321,6 +325,7 @@ type PubAck interface {
 	Ok() <-chan PubAck
 	Err() <-chan error
 	Msg() *Msg
+	Result() (PubAck, error)
 }
 
 // Headers for published messages.
@@ -402,9 +407,8 @@ func (js *js) Publish(subj string, data []byte, opts ...PubOpt) (PubAck, error) 
 	return js.PublishMsg(&Msg{Subject: subj, Data: data}, opts...)
 }
 
-// PubAckFuture is a future for a PubAck.
+// pubAckFuture is a future for a PubAck.
 type pubAckFuture struct {
-	pubAck
 	js     *js
 	msg    *Msg
 	pa     *pubAck
@@ -414,16 +418,29 @@ type pubAckFuture struct {
 	doneCh chan PubAck
 }
 
+func (paf *pubAckFuture) Stream() string {
+	return paf.pa.stream
+}
+
+func (paf *pubAckFuture) Sequence() uint64 {
+	return paf.pa.sequence
+}
+
+func (paf *pubAckFuture) Duplicate() bool {
+	return paf.pa.duplicate
+}
+
 func (paf *pubAckFuture) Ok() <-chan PubAck {
 	paf.js.mu.Lock()
 	defer paf.js.mu.Unlock()
 
 	if paf.doneCh == nil {
 		paf.doneCh = make(chan PubAck, 1)
+		if paf.pa != nil {
+			paf.doneCh <- paf.pa
+		}
 	}
-	if paf.pa != nil {
-		paf.doneCh <- paf.pa
-	}
+
 	return paf.doneCh
 }
 
@@ -433,10 +450,11 @@ func (paf *pubAckFuture) Err() <-chan error {
 
 	if paf.errCh == nil {
 		paf.errCh = make(chan error, 1)
+		if paf.err != nil {
+			paf.errCh <- paf.err
+		}
 	}
-	if paf.err != nil {
-		paf.errCh <- paf.err
-	}
+
 	return paf.errCh
 }
 
@@ -444,6 +462,33 @@ func (paf *pubAckFuture) Msg() *Msg {
 	paf.js.mu.RLock()
 	defer paf.js.mu.RUnlock()
 	return paf.msg
+}
+
+func (paf *pubAckFuture) Result() (PubAck, error) {
+	var pa PubAck
+	var err error
+
+	paf.js.mu.RLock()
+	pa = paf.pa
+	err = paf.err
+	paf.js.mu.RUnlock()
+
+	if pa != nil || err != nil {
+		fmt.Println("DONE so yielding these:", pa, err)
+		return pa, err
+	}
+
+	okCh := paf.Ok()
+	errCh := paf.Err()
+
+	// One of these is ensured to yield because either a response,
+	// timeout or error will eventually occur.
+	select {
+	case pa = <-okCh:
+	case err = <-errCh:
+	}
+
+	return pa, err
 }
 
 // For quick token lookup etc.
@@ -558,8 +603,21 @@ func (js *js) handleAsyncReply(m *Msg) {
 
 	doErr := func(err error) {
 		paf.err = err
+
+		// Send the error if there is a consumer.
 		if paf.errCh != nil {
 			paf.errCh <- paf.err
+
+			// Close the done channel in case there is a consumer,
+			// then make it nil so that it always blocks.
+			if paf.doneCh != nil {
+				// Unblock consumers that were waiting.
+				close(paf.doneCh)
+
+				// Nil channel so that it always blocks on select
+				// if attempted to be consumed.
+				paf.doneCh = nil
+			}
 		}
 		cb := js.opts.aecb
 		js.mu.Unlock()
@@ -596,12 +654,22 @@ func (js *js) handleAsyncReply(m *Msg) {
 	}
 	if paf.doneCh != nil {
 		paf.doneCh <- paf.pa
+
+		// Close the errCh in case it is present.
+		if paf.errCh != nil {
+			// Unblock those waiting.
+			close(paf.errCh)
+
+			// Nil channel again so that it always blocks
+			// if attempted to be consumed.
+			paf.errCh = nil
+		}
 	}
 	js.mu.Unlock()
 }
 
 // MsgErrHandler is used to process asynchronous errors from
-// JetStream PublishAsync and PublishAsynMsg. It will return the original
+// JetStream PublishAsync and PublishAsyncMsg. It will return the original
 // message sent to the server for possible retransmitting and the error encountered.
 type MsgErrHandler func(JetStream, *Msg, error)
 
@@ -747,6 +815,21 @@ func (ttl MaxWait) configureJSContext(js *jsOpts) error {
 
 func (ttl MaxWait) configurePull(opts *pullOpts) error {
 	opts.ttl = time.Duration(ttl)
+	return nil
+}
+
+type MaxAckPending int
+
+func (max MaxAckPending) configureSubscribe(opts *subOpts) error {
+	opts.cfg.MaxAckPending = int(max)
+	return nil
+}
+
+func (max MaxAckPending) configureJSContext(opts *jsOpts) error {
+	if max < 1 {
+		return errors.New("nats: max ack pending should be >= 1")
+	}
+	opts.maxap = int(max)
 	return nil
 }
 
@@ -1228,13 +1311,6 @@ func AckExplicit() SubOpt {
 func MaxDeliver(n int) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.cfg.MaxDeliver = n
-		return nil
-	})
-}
-
-func MaxAckPending(n int) SubOpt {
-	return subOptFn(func(opts *subOpts) error {
-		opts.cfg.MaxAckPending = n
 		return nil
 	})
 }
