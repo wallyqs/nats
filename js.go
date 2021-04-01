@@ -1716,8 +1716,7 @@ func (m *Msg) InProgress(opts ...AckOpt) error {
 
 // MsgMetadata is the JetStream metadata associated with received messages.
 type MsgMetadata struct {
-	StreamSeq    uint64
-	ConsumerSeq  uint64
+	Sequence     SequencePair
 	NumDelivered uint64
 	NumPending   uint64
 	Timestamp    time.Time
@@ -1761,8 +1760,8 @@ func (m *Msg) Metadata() (*MsgMetadata, error) {
 		Timestamp:    time.Unix(0, parseNum(tokens[7])),
 		Stream:       tokens[2],
 	}
-	meta.StreamSeq = uint64(parseNum(tokens[5]))
-	meta.ConsumerSeq = uint64(parseNum(tokens[6]))
+	meta.Sequence.Stream = uint64(parseNum(tokens[5]))
+	meta.Sequence.Consumer = uint64(parseNum(tokens[6]))
 	return meta, nil
 }
 

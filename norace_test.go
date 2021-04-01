@@ -162,8 +162,8 @@ func TestNoRaceJetStreamConsumerSlowConsumer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("could not get message metadata: %s", err)
 		}
-		if meta.StreamSeq != received {
-			t.Errorf("Missed a sequence, was expecting %d but got %d, last error: '%v'", received, meta.StreamSeq, nc.LastError())
+		if meta.Sequence.Stream != received {
+			t.Errorf("Missed a sequence, was expecting %d but got %d, last error: '%v'", received, meta.Sequence.Stream, nc.LastError())
 			nc.Close()
 		}
 		m.Ack()
