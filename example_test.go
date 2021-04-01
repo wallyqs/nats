@@ -1,4 +1,4 @@
-// Copyright 2012-2019 The NATS Authors
+// Copyright 2012-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,7 +14,9 @@
 package nats_test
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -22,7 +24,6 @@ import (
 
 // Shows different ways to create a Conn
 func ExampleConnect() {
-
 	nc, _ := nats.Connect(nats.DefaultURL)
 	nc.Close()
 
@@ -276,4 +277,155 @@ func ExampleEncodedConn_BindRecvChan() {
 	who := <-ch
 
 	fmt.Printf("%v says hello!\n", who)
+}
+
+func ExampleJetStream() {
+	nc, err := nats.Connect("localhost")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Use the JetStream context to produce and consumer messages
+	// that have been persisted.
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	js.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo"},
+	})
+
+	js.Publish("foo", []byte("Hello JS!"))
+
+	// Create async consumer on subject 'foo'. Async subscribers
+	// ack a message once exiting the callback.
+	js.Subscribe("foo", func(msg *nats.Msg) {
+		meta, _ := msg.Metadata()
+		fmt.Printf("Stream Sequence  : %v\n", meta.Sequence.Stream)
+		fmt.Printf("Consumer Sequence: %v\n", meta.Sequence.Consumer)
+	})
+
+	// Async subscriber with manual acks.
+	js.Subscribe("foo", func(msg *nats.Msg) {
+		msg.Ack()
+	}, nats.ManualAck())
+
+	// Async queue subscription where members load balance the
+	// received messages together.
+	js.QueueSubscribe("foo", "group", func(msg *nats.Msg) {
+		msg.Ack()
+	}, nats.ManualAck())
+
+	// Subscriber to consume messages synchronously.
+	sub, _ := js.SubscribeSync("foo")
+	msg, _ := sub.NextMsg(2 * time.Second)
+	msg.Ack()
+
+	// QueueSubscribe with group or load balancing.
+	sub, _ = js.QueueSubscribeSync("foo", "group")
+	msg, _ = sub.NextMsg(2 * time.Second)
+	msg.Ack()
+
+	// ChanSubscribe
+	msgCh := make(chan *nats.Msg, 8192)
+	sub, _ = js.ChanSubscribe("foo", msgCh)
+
+	select {
+	case msg := <-msgCh:
+		fmt.Println("[Received]", msg)
+	case <-time.After(1 * time.Second):
+	}
+}
+
+func ExamplePubOpt() {
+	nc, err := nats.Connect("localhost")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create JetStream context to produce/consumer messages that will be persisted.
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create stream to persist messages published on 'foo'.
+	js.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo"},
+	})
+
+	// Publish is synchronous by default, and waits for a PubAck response.
+	js.Publish("foo", []byte("Hello JS!"))
+
+	// Publish with a custom timeout.
+	js.Publish("foo", []byte("Hello JS!"), nats.AckWait(500*time.Millisecond))
+
+	// Publish with a context.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	js.Publish("foo", []byte("Hello JS!"), nats.Context(ctx))
+
+	// Publish and assert the expected stream name.
+	js.Publish("foo", []byte("Hello JS!"), nats.ExpectStream("FOO"))
+
+	// Publish and assert the last sequence.
+	js.Publish("foo", []byte("Hello JS!"), nats.ExpectLastSequence(5))
+
+	// Publish and tag the message with an ID.
+	js.Publish("foo", []byte("Hello JS!"), nats.MsgId("foo:6"))
+
+	// Publish and assert the last msg ID.
+	js.Publish("foo", []byte("Hello JS!"), nats.ExpectLastMsgId("foo:6"))
+}
+
+func ExampleMaxWait() {
+	nc, _ := nats.Connect("localhost")
+
+	// Set default timeout for JetStream API requests,
+	// following requests will inherit this timeout.
+	js, _ := nc.JetStream(nats.MaxWait(3 * time.Second))
+
+	// Set custom timeout for a JetStream API request.
+	js.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo"},
+	}, nats.MaxWait(2*time.Second))
+
+	sub, _ := js.PullSubscribe("foo", "my-durable-name")
+
+	// Fetch using the default timeout of 3 seconds.
+	msgs, _ := sub.Fetch(1)
+
+	// Set custom timeout for a pull batch request.
+	msgs, _ = sub.Fetch(1, nats.MaxWait(2*time.Second))
+
+	for _, msg := range msgs {
+		msg.Ack()
+	}
+}
+
+func ExampleAckWait() {
+	nc, _ := nats.Connect("localhost")
+	js, _ := nc.JetStream()
+
+	// Set custom timeout for a JetStream API request.
+	js.AddStream(&nats.StreamConfig{
+		Name:     "FOO",
+		Subjects: []string{"foo"},
+	})
+
+	// Wait for an ack response for 2 seconds.
+	js.Publish("foo", []byte("Hello JS!"), nats.AckWait(2*time.Second))
+
+	// Create consumer on 'foo' subject that waits for an ack for 10s,
+	// after which the message will be delivered.
+	sub, _ := js.SubscribeSync("foo", nats.AckWait(10*time.Second))
+	msg, _ := sub.NextMsg(2 * time.Second)
+
+	// Wait for ack of ack for 2s.
+	msg.AckSync(nats.AckWait(2 * time.Second))
 }
