@@ -11,7 +11,7 @@ install:
 - go get -u github.com/client9/misspell/cmd/misspell
 before_script:
 - $(exit $(go fmt ./... | wc -l))
-- $([ ! -f 'go_test.mod' ] && cp go.mod go_test.mod && cp go.sum go_test.sum)
+- if [[ ! -f 'go_test.mod' ]]; then cp go.mod go_test.mod; cp go.sum go_test.sum; fi
 - go vet -modfile=go_test.mod ./...
 - find . -type f -name "*.go" | xargs misspell -error -locale US
 - staticcheck ./...
