@@ -562,7 +562,7 @@ type Subscription struct {
 type Msg struct {
 	Subject string
 	Reply   string
-	Header  http.Header
+	Header  Header
 	Data    []byte
 	Sub     *Subscription
 	next    *Msg
@@ -582,7 +582,8 @@ func (m *Msg) headerBytes() ([]byte, error) {
 		return nil, ErrBadHeaderMsg
 	}
 
-	err = m.Header.Write(&b)
+	header := http.Header(m.Header)
+	err = header.Write(&b)
 	if err != nil {
 		return nil, ErrBadHeaderMsg
 	}
@@ -2487,7 +2488,7 @@ func (nc *Conn) processMsg(data []byte) {
 	}
 
 	// FIXME(dlc): Should we recycle these containers?
-	m := &Msg{Header: h, Data: msgPayload, Subject: subj, Reply: reply, Sub: sub}
+	m := &Msg{Header: Header(h), Data: msgPayload, Subject: subj, Reply: reply, Sub: sub}
 
 	sub.mu.Lock()
 
@@ -2862,11 +2863,30 @@ func (nc *Conn) Publish(subj string, data []byte) error {
 	return nc.publish(subj, _EMPTY_, nil, data)
 }
 
+// Header is a NATS Header that can be used.
+type Header map[string][]string
+
+func (h Header) Add(key, value string) {
+	textproto.MIMEHeader(h).Add(key, value)
+}
+
+func (h Header) Set(key, value string) {
+	textproto.MIMEHeader(h).Set(key, value)
+}
+
+func (h Header) Get(key string) string {
+	return textproto.MIMEHeader(h).Get(key)
+}
+
+func (h Header) Values(key string) []string {
+	return textproto.MIMEHeader(h).Values(key)
+}
+
 // NewMsg creates a message for publishing that will use headers.
 func NewMsg(subject string) *Msg {
 	return &Msg{
 		Subject: subject,
-		Header:  make(http.Header),
+		Header:  make(Header),
 	}
 }
 
@@ -2886,15 +2906,60 @@ const (
 
 // decodeHeadersMsg will decode and headers.
 func decodeHeadersMsg(data []byte) (http.Header, error) {
+	fmt.Println(">>>>", string(data))
 	tp := textproto.NewReader(bufio.NewReader(bytes.NewReader(data)))
 	l, err := tp.ReadLine()
 	if err != nil || len(l) < hdrPreEnd || l[:hdrPreEnd] != hdrLine[:hdrPreEnd] {
 		return nil, ErrBadHeaderMsg
 	}
-	mh, err := tp.ReadMIMEHeader()
+
+	var (
+		mh = make(textproto.MIMEHeader)
+		strs []string
+	)
+	for {
+		kv, err := tp.ReadLine()
+		// fmt.Println("KV", kv, "||||", err)
+		if len(kv) == 0 || err != nil {
+			// fmt.Println("no more!", err)
+			break
+		}
+
+		// Key ends at first colon.
+		i := bytes.IndexByte([]byte(kv), ':')
+		if i < 0 {
+			// fmt.Println("this one?", i, kv)
+			return nil, ErrBadHeaderMsg
+		}
+
+		// Case Preserving Key
+		key := kv[:i]
+		if key == "" {
+			continue
+		}
+		i++
+		for i < len(kv) && (kv[i] == ' ' || kv[i] == '\t') {
+			i++
+		}
+		value := string(kv[i:])
+		vv := mh[key]
+		if vv == nil && len(strs) > 0 {
+			vv, strs = strs[:1:1], strs[1:]
+			vv[0] = value
+			mh[key] = vv
+		} else {
+			mh[key] = append(vv, value)
+		}
+		// fmt.Println("pssssssst:", key, mh)
+	}
+
+	// mh, err := tp.ReadMIMEHeader()
+	// fmt.Println("ERROR: >>>>>>>", err)
 	if err != nil {
 		return nil, ErrBadHeaderMsg
 	}
+	// fmt.Println("result::::", mh)
+
 	// Check if we have an inlined status.
 	if len(l) > hdrPreEnd {
 		var description string
@@ -3187,7 +3252,7 @@ func (nc *Conn) request(subj string, hdr, data []byte, timeout time.Duration) (*
 	}
 
 	// Check for no responder status.
-	if err == nil && len(m.Data) == 0 && m.Header.Get(statusHdr) == noResponders {
+	if err == nil && len(m.Data) == 0 && http.Header(m.Header).Get(statusHdr) == noResponders {
 		m, err = nil, ErrNoResponders
 	}
 	return m, err
@@ -3706,7 +3771,7 @@ func (nc *Conn) handleConsumerSequenceMismatch(sub *Subscription, err error) {
 }
 
 func isControlMessage(msg *Msg) bool {
-	return len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
+	return len(msg.Data) == 0 && http.Header(msg.Header).Get(statusHdr) == controlMsg
 }
 
 func (jsi *jsSub) trackSequences(msg *Msg) {

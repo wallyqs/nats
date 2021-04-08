@@ -16,6 +16,7 @@ package nats
 import (
 	"context"
 	"reflect"
+	"net/http"
 )
 
 // RequestMsgWithContext takes a context, a subject and payload
@@ -84,7 +85,7 @@ func (nc *Conn) requestWithContext(ctx context.Context, subj string, hdr, data [
 		}
 	}
 	// Check for no responder status.
-	if err == nil && len(m.Data) == 0 && m.Header.Get(statusHdr) == noResponders {
+	if err == nil && len(m.Data) == 0 && http.Header(m.Header).Get(statusHdr) == noResponders {
 		m, err = nil, ErrNoResponders
 	}
 	return m, err

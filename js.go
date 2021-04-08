@@ -283,7 +283,7 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 	var o pubOpts
 	if len(opts) > 0 {
 		if m.Header == nil {
-			m.Header = http.Header{}
+			m.Header = Header{}
 		}
 		for _, opt := range opts {
 			if err := opt.configurePublish(&o); err != nil {
@@ -299,17 +299,18 @@ func (js *js) PublishMsg(m *Msg, opts ...PubOpt) (*PubAck, error) {
 		o.ttl = js.opts.wait
 	}
 
+	hdr := http.Header(m.Header)
 	if o.id != _EMPTY_ {
-		m.Header.Set(MsgIdHdr, o.id)
+		hdr.Set(MsgIdHdr, o.id)
 	}
 	if o.lid != _EMPTY_ {
-		m.Header.Set(ExpectedLastMsgIdHdr, o.lid)
+		hdr.Set(ExpectedLastMsgIdHdr, o.lid)
 	}
 	if o.str != _EMPTY_ {
-		m.Header.Set(ExpectedStreamHdr, o.str)
+		hdr.Set(ExpectedStreamHdr, o.str)
 	}
 	if o.seq > 0 {
-		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.seq, 10))
+		hdr.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.seq, 10))
 	}
 
 	var resp *Msg
@@ -524,7 +525,8 @@ func (js *js) handleAsyncReply(m *Msg) {
 	}
 
 	// Process no responders etc.
-	if len(m.Data) == 0 && m.Header.Get(statusHdr) == noResponders {
+	hdr := http.Header(m.Header)
+	if len(m.Data) == 0 && hdr.Get(statusHdr) == noResponders {
 		doErr(ErrNoResponders)
 		return
 	}
@@ -584,7 +586,7 @@ func (js *js) PublishMsgAsync(m *Msg, opts ...PubOpt) (PubAckFuture, error) {
 	var o pubOpts
 	if len(opts) > 0 {
 		if m.Header == nil {
-			m.Header = http.Header{}
+			m.Header = Header{}
 		}
 		for _, opt := range opts {
 			if err := opt.configurePublish(&o); err != nil {
@@ -599,17 +601,18 @@ func (js *js) PublishMsgAsync(m *Msg, opts ...PubOpt) (PubAckFuture, error) {
 	}
 
 	// FIXME(dlc) - Make common.
+	hdr := http.Header(m.Header)
 	if o.id != _EMPTY_ {
-		m.Header.Set(MsgIdHdr, o.id)
+		hdr.Set(MsgIdHdr, o.id)
 	}
 	if o.lid != _EMPTY_ {
-		m.Header.Set(ExpectedLastMsgIdHdr, o.lid)
+		hdr.Set(ExpectedLastMsgIdHdr, o.lid)
 	}
 	if o.str != _EMPTY_ {
-		m.Header.Set(ExpectedStreamHdr, o.str)
+		hdr.Set(ExpectedStreamHdr, o.str)
 	}
 	if o.seq > 0 {
-		m.Header.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.seq, 10))
+		hdr.Set(ExpectedLastSeqHdr, strconv.FormatUint(o.seq, 10))
 	}
 
 	// Reply
@@ -1072,7 +1075,7 @@ func (nc *Conn) processControlFlow(msg *Msg, s *Subscription, jsi *jsSub) {
 		}
 		// Consumer sequence
 		dseq := tokens[6]
-		ldseq := msg.Header.Get(lastConsumerSeqHdr)
+		ldseq := http.Header(msg.Header).Get(lastConsumerSeqHdr)
 
 		// Detect consumer sequence mismatch and whether
 		// should restart the consumer.
@@ -1382,13 +1385,13 @@ func (sub *Subscription) Fetch(batch int, opts ...PullOpt) ([]*Msg, error) {
 	// any status messages.
 	checkMsg := func(msg *Msg) error {
 		if len(msg.Data) == 0 {
-			switch msg.Header.Get(statusHdr) {
+			switch http.Header(msg.Header).Get(statusHdr) {
 			case noResponders:
 				return ErrNoResponders
 			case noMessages:
 				return errNoMessages
 			case "400", "408", "409":
-				return fmt.Errorf("nats: %s", msg.Header.Get(descrHdr))
+				return fmt.Errorf("nats: %s", http.Header(msg.Header).Get(descrHdr))
 			}
 		}
 		return nil
