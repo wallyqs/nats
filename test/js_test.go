@@ -1714,6 +1714,9 @@ func testJetStreamManagement_GetMsg(t *testing.T, srvs ...*jsServer) {
 		msg := nats.NewMsg("foo.A")
 		data := fmt.Sprintf("A:%d", i)
 		msg.Data = []byte(data)
+		msg.Header = http.Header{
+			"X-NATS-Key": []string{"123"},
+		}
 		msg.Header.Add("X-Nats-Test-Data", data)
 		js.PublishMsg(msg)
 		js.Publish("foo.B", []byte(fmt.Sprintf("B:%d", i)))
@@ -1827,9 +1830,22 @@ func testJetStreamManagement_GetMsg(t *testing.T, srvs ...*jsServer) {
 		}
 		expectedMap := map[string][]string{
 			"X-Nats-Test-Data": {"A:1"},
+			"X-NATS-Key":       {"123"},
 		}
 		if !reflect.DeepEqual(streamMsg.Header, http.Header(expectedMap)) {
 			t.Errorf("Expected %v, got: %v", expectedMap, streamMsg.Header)
+		}
+
+		sub, err := js.SubscribeSync("foo.A", nats.StartSequence(4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := sub.NextMsg(2 * time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(msg.Header, http.Header(expectedMap)) {
+			t.Errorf("Expected %v, got: %v", expectedMap, msg.Header)
 		}
 	})
 }
