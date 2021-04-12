@@ -2361,7 +2361,6 @@ func (nc *Conn) readLoop() {
 func (nc *Conn) waitForMsgs(s *Subscription) {
 	var closed bool
 	var delivered, max uint64
-	isJSSub := s.jsi != nil
 
 	// Used to account for adjustments to sub.pBytes when we wrap back around.
 	msgLen := -1
