@@ -1053,11 +1053,69 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, isSync 
 	return sub, nil
 }
 
+// ErrConsumerSequenceMismatch represents an error from a consumer
+// that received a Heartbeat including sequence different to the
+// one expected from the view of the client.
+type ErrConsumerSequenceMismatch struct {
+	// StreamResumeSequence is the stream sequence from where the consumer
+	// should resume consuming from the stream.
+	StreamResumeSequence uint64
+
+	// ConsumerSequence is the sequence of the consumer that is behind.
+	ConsumerSequence int64
+
+	// LastConsumerSequence is the sequence of the consumer when the heartbeat
+	// was received.
+	LastConsumerSequence int64
+}
+
+func (ecs *ErrConsumerSequenceMismatch) Error() string {
+	return fmt.Sprintf("nats: sequence mismatch for consumer at sequence %d (%d sequences behind), should restart consumer from stream sequence %d",
+		ecs.ConsumerSequence,
+		ecs.LastConsumerSequence-ecs.ConsumerSequence,
+		ecs.StreamResumeSequence,
+	)
+}
+
+func isControlMessage(msg *Msg) bool {
+	if len(msg.Data) > 0 {
+		return false
+	}
+	// We know that the server will always send messages
+	// using canonical names so can check in map directly.
+	hdr := msg.Header[statusHdr]
+	return len(hdr) == 1 && hdr[0] == controlMsg
+}
+
+func (jsi *jsSub) trackSequences(msg *Msg) {
+	var ctrl *controlMetadata
+	if cmeta := jsi.cmeta.Load(); cmeta == nil {
+		ctrl = &controlMetadata{}
+	} else {
+		ctrl = cmeta.(*controlMetadata)
+	}
+	ctrl.meta = msg.Reply
+	jsi.cmeta.Store(ctrl)
+}
+
+// handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
+func (nc *Conn) handleConsumerSequenceMismatch(sub *Subscription, err error) {
+	nc.mu.Lock()
+	errCB := nc.Opts.AsyncErrorCB
+	if errCB != nil {
+		nc.ach.push(func() { errCB(nc, sub, err) })
+	}
+	nc.mu.Unlock()
+}
+
+// processControlFlow will automatically respond to control messages sent by the server.
 func (nc *Conn) processControlFlow(msg *Msg, s *Subscription, jsi *jsSub) {
 	// If it is a flow control message then have to ack.
 	if msg.Reply != "" {
+		// fmt.Println(time.Now(), "FLOW:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
 		nc.publish(msg.Reply, _EMPTY_, nil, nil)
 	} else if jsi.hbs {
+		// fmt.Println(time.Now(), "HB:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
 		// Process heartbeat received, get latest control metadata if present.
 		var ctrl *controlMetadata
 		cmeta := jsi.cmeta.Load()

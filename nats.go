@@ -2361,6 +2361,7 @@ func (nc *Conn) readLoop() {
 func (nc *Conn) waitForMsgs(s *Subscription) {
 	var closed bool
 	var delivered, max uint64
+	isJSSub := s.jsi != nil
 
 	// Used to account for adjustments to sub.pBytes when we wrap back around.
 	msgLen := -1
@@ -2373,6 +2374,8 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 			s.pMsgs--
 			s.pBytes -= msgLen
 			msgLen = -1
+		} else if isJSSub {
+			
 		}
 
 		if s.pHead == nil && !s.closed {
@@ -3718,55 +3721,6 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 		fmt.Fprintf(nc.bw, unsubProto, s.sid, maxStr)
 	}
 	return nil
-}
-
-// ErrConsumerSequenceMismatch represents an error from a consumer
-// that received a Heartbeat including sequence different to the
-// one expected from the view of the client.
-type ErrConsumerSequenceMismatch struct {
-	// StreamResumeSequence is the stream sequence from where the consumer
-	// should resume consuming from the stream.
-	StreamResumeSequence uint64
-
-	// ConsumerSequence is the sequence of the consumer that is behind.
-	ConsumerSequence int64
-
-	// LastConsumerSequence is the sequence of the consumer when the heartbeat
-	// was received.
-	LastConsumerSequence int64
-}
-
-func (ecs *ErrConsumerSequenceMismatch) Error() string {
-	return fmt.Sprintf("nats: sequence mismatch for consumer at sequence %d (%d sequences behind), should restart consumer from stream sequence %d",
-		ecs.ConsumerSequence,
-		ecs.LastConsumerSequence-ecs.ConsumerSequence,
-		ecs.StreamResumeSequence,
-	)
-}
-
-// handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
-func (nc *Conn) handleConsumerSequenceMismatch(sub *Subscription, err error) {
-	nc.mu.Lock()
-	errCB := nc.Opts.AsyncErrorCB
-	if errCB != nil {
-		nc.ach.push(func() { errCB(nc, sub, err) })
-	}
-	nc.mu.Unlock()
-}
-
-func isControlMessage(msg *Msg) bool {
-	return len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
-}
-
-func (jsi *jsSub) trackSequences(msg *Msg) {
-	var ctrl *controlMetadata
-	if cmeta := jsi.cmeta.Load(); cmeta == nil {
-		ctrl = &controlMetadata{}
-	} else {
-		ctrl = cmeta.(*controlMetadata)
-	}
-	ctrl.meta = msg.Reply
-	jsi.cmeta.Store(ctrl)
 }
 
 // NextMsg will return the next message available to a synchronous subscriber

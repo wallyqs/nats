@@ -1411,6 +1411,123 @@ Loop:
 	})
 }
 
+func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer s.Shutdown()
+
+	if config := s.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
+	errCh := make(chan error)
+	errHandler := nats.ErrorHandler(func(c *nats.Conn, sub *nats.Subscription, err error) {
+		t.Logf("WARN: %s : %+v", err, sub)
+		errCh <- err
+	})
+	nc, err := nats.Connect(s.ClientURL(), errHandler)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	// Burst and try to hit the flow control limit of the server.
+	const totalMsgs = 16536 * 20 * 5
+
+	js, err := nc.JetStream(nats.PublishAsyncMaxPending(totalMsgs))
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	payload := strings.Repeat("O", 4096)
+	go func() {
+		for i := 0; i < totalMsgs; i++ {
+			if _, err := js.PublishAsync("foo", []byte(payload)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}()
+
+	// Small channel that blocks and then buffered channel that can be delivered
+	// all messages without blocking.
+	recvd := make(chan *nats.Msg, 16)
+	delivered := make(chan *nats.Msg, totalMsgs)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Dispatch channel consumer
+	go func() {
+		for {
+			select {
+			case msg := <-recvd:
+				msg.Ack()
+				delivered <- msg
+				// case <-ctx.Done():
+				// 	return
+			}
+		}
+	}()
+
+	sub, err := js.Subscribe("foo", func(msg *nats.Msg) {
+		// Cause bottleneck by having channel block when full.
+		recvd <- msg
+
+		if len(recvd) == totalMsgs {
+			cancel()
+		}
+	}, nats.ManualAck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Unsubscribe()
+
+	go func() {
+		for range time.NewTicker(100 * time.Millisecond).C {
+			select {
+			case <-ctx.Done():
+			default:
+			}
+
+			a, b, c := sub.Pending()
+			fmt.Printf("%v STATUS: %v  :>  %v  <:  %v  :%v  :  %v  :  67108864\n", time.Now(), a, b, c, len(recvd), len(delivered))
+		}
+	}()
+
+	// for i := 0; i < totalMsgs; i++ {
+	// 	if _, err := js.PublishAsync("foo", []byte(payload)); err != nil {
+	// 		t.Fatal(err)
+	// 	}
+	// }
+
+	// info, err := sub.ConsumerInfo()
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	// if !info.Config.FlowControl {
+	// 	t.Fatal("Expected Flow Control to be enabled")
+	// }
+	<-ctx.Done()
+
+	got := len(delivered)
+	expected := totalMsgs
+	if got != expected {
+		t.Errorf("Expected %v, got: %v", expected, got)
+	}
+
+	// Wait for a couple of heartbeats to arrive and confirm there is no error.
+	select {
+	case <-time.After(1 * time.Second):
+	case err := <-errCh:
+		t.Fatal(err)
+	}
+}
+
 func TestJetStream_Drain(t *testing.T) {
 	s := RunBasicJetStreamServer()
 	defer s.Shutdown()
