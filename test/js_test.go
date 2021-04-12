@@ -1431,7 +1431,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 	defer nc.Close()
 
 	// Burst and try to hit the flow control limit of the server.
-	const totalMsgs = 16536 * 20 * 5
+	const totalMsgs = 16536 * 5
 
 	js, err := nc.JetStream(nats.PublishAsyncMaxPending(totalMsgs))
 	if err != nil {
@@ -1445,7 +1445,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	payload := strings.Repeat("O", 4096*10)
+	payload := strings.Repeat("O", 4096)
 	go func() {
 		for i := 0; i < totalMsgs; i++ {
 			if _, err := js.PublishAsync("foo", []byte(payload)); err != nil {
@@ -1456,7 +1456,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 
 	// Small channel that blocks and then buffered channel that can be delivered
 	// all messages without blocking.
-	recvd := make(chan *nats.Msg, 16)
+	recvd := make(chan *nats.Msg, 64)
 	delivered := make(chan *nats.Msg, totalMsgs)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1466,6 +1466,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 		for {
 			select {
 			case msg := <-recvd:
+				// Ack of Ack to cause more work.
 				msg.AckSync()
 				delivered <- msg
 				// case <-ctx.Done():
@@ -1481,8 +1482,8 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 		if len(recvd) == totalMsgs {
 			cancel()
 		}
-	}, nats.ManualAck())
-	
+	}, nats.ManualAck(), nats.EnableFlowControl())
+
 	if err != nil {
 		t.Fatal(err)
 	}
