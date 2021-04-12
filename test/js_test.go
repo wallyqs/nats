@@ -1445,7 +1445,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	payload := strings.Repeat("O", 4096)
+	payload := strings.Repeat("O", 4096*10)
 	go func() {
 		for i := 0; i < totalMsgs; i++ {
 			if _, err := js.PublishAsync("foo", []byte(payload)); err != nil {
@@ -1466,7 +1466,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 		for {
 			select {
 			case msg := <-recvd:
-				msg.Ack()
+				msg.AckSync()
 				delivered <- msg
 				// case <-ctx.Done():
 				// 	return
@@ -1482,6 +1482,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeAsyncThenChannel(t *testing
 			cancel()
 		}
 	}, nats.ManualAck())
+	
 	if err != nil {
 		t.Fatal(err)
 	}

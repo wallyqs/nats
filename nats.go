@@ -2374,8 +2374,6 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 			s.pMsgs--
 			s.pBytes -= msgLen
 			msgLen = -1
-		} else if isJSSub {
-			
 		}
 
 		if s.pHead == nil && !s.closed {
