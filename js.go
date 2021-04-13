@@ -984,6 +984,13 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, isSync 
 		if err != nil {
 			return nil, err
 		}
+
+		// With flow control enabled subscriptions we will disable msgs limits (some of them will be empty messages),
+		// and set a larger pending bytes limit by default.
+		if cb != nil || isSync {
+			sub.SetPendingLimits(-1, DefaultSubPendingBytesLimit*4)
+			fmt.Println("------------------>", DefaultSubPendingBytesLimit*4)
+		}
 	}
 
 	// If we are creating or updating let's process that request.
@@ -1112,7 +1119,7 @@ func (nc *Conn) handleConsumerSequenceMismatch(sub *Subscription, err error) {
 func (nc *Conn) processControlFlow(msg *Msg, s *Subscription, jsi *jsSub) {
 	// If it is a flow control message then have to ack.
 	if msg.Reply != "" {
-		// fmt.Println(time.Now(), "FLOW:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
+		fmt.Println(time.Now(), "FLOW:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
 		nc.publish(msg.Reply, _EMPTY_, nil, nil)
 	} else if jsi.hbs {
 		// fmt.Println(time.Now(), "HB:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
