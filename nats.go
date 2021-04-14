@@ -2609,6 +2609,7 @@ func (nc *Conn) processMsg(data []byte) {
 	var err error
 	var ctrl bool
 	var hasFC bool
+	var hasHBs bool
 
 	if nc.ps.ma.hdr > 0 {
 		hbuf := msgPayload[:nc.ps.ma.hdr]
@@ -2634,6 +2635,7 @@ func (nc *Conn) processMsg(data []byte) {
 	jsi := sub.jsi
 	if jsi != nil {
 		ctrl = isControlMessage(m)
+		hasHBs = jsi.hbs
 		hasFC = jsi.fc
 	}
 
@@ -2683,9 +2685,15 @@ func (nc *Conn) processMsg(data []byte) {
 				sub.pTail = m
 			}
 		}
-		if hasFC {
-			jsi.trackSequences(m)
+		if hasHBs {
+			// Store the ACK metadata from the message to
+			// compare later on with the received heartbeat.
+			jsi.trackSequences(m.Reply)
 		}
+	} else if hasFC && m.Reply != "" {
+		// This is a flow control message, we will make
+		// a reply after the next ACK from client.
+		jsi.scheduleFlowControlResponse(m.Reply)
 	}
 
 	// Clear SlowConsumer status.
@@ -2693,10 +2701,9 @@ func (nc *Conn) processMsg(data []byte) {
 
 	sub.mu.Unlock()
 
-	// Handle flow control and heartbeat messages automatically
-	// for JetStream Push consumers.
-	if ctrl {
-		nc.processControlFlow(m, sub, jsi)
+	// Handle control heartbeat messages.
+	if ctrl && hasHBs && m.Reply == "" {
+		nc.processSequenceMismatch(m, sub, jsi)
 	}
 
 	return
@@ -3879,55 +3886,6 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 		nc.kickFlusher()
 	}
 	return nil
-}
-
-// ErrConsumerSequenceMismatch represents an error from a consumer
-// that received a Heartbeat including sequence different to the
-// one expected from the view of the client.
-type ErrConsumerSequenceMismatch struct {
-	// StreamResumeSequence is the stream sequence from where the consumer
-	// should resume consuming from the stream.
-	StreamResumeSequence uint64
-
-	// ConsumerSequence is the sequence of the consumer that is behind.
-	ConsumerSequence int64
-
-	// LastConsumerSequence is the sequence of the consumer when the heartbeat
-	// was received.
-	LastConsumerSequence int64
-}
-
-func (ecs *ErrConsumerSequenceMismatch) Error() string {
-	return fmt.Sprintf("nats: sequence mismatch for consumer at sequence %d (%d sequences behind), should restart consumer from stream sequence %d",
-		ecs.ConsumerSequence,
-		ecs.LastConsumerSequence-ecs.ConsumerSequence,
-		ecs.StreamResumeSequence,
-	)
-}
-
-// handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
-func (nc *Conn) handleConsumerSequenceMismatch(sub *Subscription, err error) {
-	nc.mu.Lock()
-	errCB := nc.Opts.AsyncErrorCB
-	if errCB != nil {
-		nc.ach.push(func() { errCB(nc, sub, err) })
-	}
-	nc.mu.Unlock()
-}
-
-func isControlMessage(msg *Msg) bool {
-	return len(msg.Data) == 0 && msg.Header.Get(statusHdr) == controlMsg
-}
-
-func (jsi *jsSub) trackSequences(msg *Msg) {
-	var ctrl *controlMetadata
-	if cmeta := jsi.cmeta.Load(); cmeta == nil {
-		ctrl = &controlMetadata{}
-	} else {
-		ctrl = cmeta.(*controlMetadata)
-	}
-	ctrl.meta = msg.Reply
-	jsi.cmeta.Store(ctrl)
 }
 
 // NextMsg will return the next message available to a synchronous subscriber
