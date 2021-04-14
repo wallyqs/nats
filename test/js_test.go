@@ -989,7 +989,7 @@ func TestJetStreamPushFlowControlHeartbeats_SubscribeSync(t *testing.T) {
 	}
 
 	// Burst and try to hit the flow control limit of the server.
-	const totalMsgs = 16536*4
+	const totalMsgs = 16536 * 2
 	payload := strings.Repeat("A", 1024)
 	for i := 0; i < totalMsgs; i++ {
 		if _, err := js.Publish("foo", []byte(fmt.Sprintf("i:%d/", i)+payload)); err != nil {

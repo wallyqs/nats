@@ -820,17 +820,11 @@ type jsSub struct {
 	attached bool
 
 	// Heartbeats and Flow Control handling from push consumers.
-	hbs bool
-	fc  bool
-
-	// cmeta is holds metadata from a push consumer when HBs are enabled.
-	cmeta atomic.Value
-}
-
-// controlMetadata is metadata used to be able to detect sequence mismatch
-// errors in push based consumers that have heartbeats enabled.
-type controlMetadata struct {
-	meta string
+	mu      sync.RWMutex
+	hbs     bool
+	fc      bool
+	cmeta   string
+	fcInbox string
 }
 
 func (jsi *jsSub) unsubscribe(drainMode bool) error {
@@ -1084,25 +1078,27 @@ func (ecs *ErrConsumerSequenceMismatch) Error() string {
 	)
 }
 
+// isControlMessage will return true if this is an empty control status message.
 func isControlMessage(msg *Msg) bool {
 	if len(msg.Data) > 0 {
 		return false
 	}
 	// We know that the server will always send messages
-	// using canonical names so can check in map directly.
+	// using canonical names so can check from map directly.
 	hdr := msg.Header[statusHdr]
 	return len(hdr) == 1 && hdr[0] == controlMsg
 }
 
-func (jsi *jsSub) trackSequences(msg *Msg) {
-	var ctrl *controlMetadata
-	if cmeta := jsi.cmeta.Load(); cmeta == nil {
-		ctrl = &controlMetadata{}
-	} else {
-		ctrl = cmeta.(*controlMetadata)
-	}
-	ctrl.meta = msg.Reply
-	jsi.cmeta.Store(ctrl)
+func (jsi *jsSub) trackSequences(reply string) {
+	jsi.mu.Lock()
+	jsi.cmeta = reply
+	jsi.mu.Unlock()
+}
+
+func (jsi *jsSub) scheduleFlowControlResponse(reply string) {
+	jsi.mu.Lock()
+	jsi.fcInbox = reply
+	jsi.mu.Unlock()
 }
 
 // handleConsumerSequenceMismatch will send an async error that can be used to restart a push based consumer.
@@ -1116,42 +1112,41 @@ func (nc *Conn) handleConsumerSequenceMismatch(sub *Subscription, err error) {
 }
 
 // processControlFlow will automatically respond to control messages sent by the server.
-func (nc *Conn) processControlFlow(msg *Msg, s *Subscription, jsi *jsSub) {
-	// If it is a flow control message then have to ack.
-	if msg.Reply != "" {
-		fmt.Println(time.Now(), "FLOW:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
-		nc.publish(msg.Reply, _EMPTY_, nil, nil)
-	} else if jsi.hbs {
-		// fmt.Println(time.Now(), "HB:", s.pMsgs, s.pBytes, float64(s.pBytes)/1024/1024, s.pBytesLimit, msg.Reply, msg.Subject)
-		// Process heartbeat received, get latest control metadata if present.
-		var ctrl *controlMetadata
-		cmeta := jsi.cmeta.Load()
-		if cmeta == nil {
-			return
-		}
+func (nc *Conn) processSequenceMismatch(msg *Msg, s *Subscription, jsi *jsSub) {
+	// Process heartbeat received, get latest control metadata if present.
+	jsi.mu.RLock()
+	ctrl := jsi.cmeta
+	jsi.mu.RUnlock()
 
-		ctrl = cmeta.(*controlMetadata)
-		tokens, err := getMetadataFields(ctrl.meta)
-		if err != nil {
-			return
-		}
-		// Consumer sequence
-		dseq := tokens[6]
-		ldseq := msg.Header.Get(lastConsumerSeqHdr)
+	if ctrl == "" {
+		return
+	}
 
-		// Detect consumer sequence mismatch and whether
-		// should restart the consumer.
-		if ldseq != dseq {
-			// Dispatch async error including details such as
-			// from where the consumer could be restarted.
-			sseq := parseNum(tokens[5])
-			ecs := &ErrConsumerSequenceMismatch{
-				StreamResumeSequence: uint64(sseq),
-				ConsumerSequence:     parseNum(dseq),
-				LastConsumerSequence: parseNum(ldseq),
-			}
-			nc.handleConsumerSequenceMismatch(s, ecs)
+	tokens, err := getMetadataFields(ctrl)
+	if err != nil {
+		return
+	}
+
+	// Consumer sequence.
+	var ldseq string
+	dseq := tokens[6]
+	hdr := msg.Header[lastConsumerSeqHdr]
+	if len(hdr) == 1 {
+		ldseq = hdr[0]
+	}
+
+	// Detect consumer sequence mismatch and whether
+	// should restart the consumer.
+	if ldseq != dseq {
+		// Dispatch async error including details such as
+		// from where the consumer could be restarted.
+		sseq := parseNum(tokens[5])
+		ecs := &ErrConsumerSequenceMismatch{
+			StreamResumeSequence: uint64(sseq),
+			ConsumerSequence:     parseNum(dseq),
+			LastConsumerSequence: parseNum(ldseq),
 		}
+		nc.handleConsumerSequenceMismatch(s, ecs)
 	}
 }
 
@@ -1684,12 +1679,12 @@ func (js *js) getConsumerInfoContext(ctx context.Context, stream, consumer strin
 	return info.ConsumerInfo, nil
 }
 
-func (m *Msg) checkReply() (*js, bool, error) {
+func (m *Msg) checkReply() (*js, *jsSub, error) {
 	if m == nil || m.Sub == nil {
-		return nil, false, ErrMsgNotBound
+		return nil, nil, ErrMsgNotBound
 	}
 	if m.Reply == "" {
-		return nil, false, ErrMsgNoReply
+		return nil, nil, ErrMsgNoReply
 	}
 	sub := m.Sub
 	sub.mu.Lock()
@@ -1697,13 +1692,13 @@ func (m *Msg) checkReply() (*js, bool, error) {
 		sub.mu.Unlock()
 
 		// Not using a JS context.
-		return nil, false, nil
+		return nil, nil, nil
 	}
 	js := sub.jsi.js
-	isPullMode := sub.jsi.pull
+	jsi := sub.jsi
 	sub.mu.Unlock()
 
-	return js, isPullMode, nil
+	return js, jsi, nil
 }
 
 // ackReply handles all acks. Will do the right thing for pull and sync mode.
@@ -1717,7 +1712,7 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...AckOpt) error {
 		}
 	}
 
-	js, _, err := m.checkReply()
+	js, jsi, err := m.checkReply()
 	if err != nil {
 		return err
 	}
@@ -1756,6 +1751,22 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...AckOpt) error {
 	// which can be sent many times.
 	if err == nil && !bytes.Equal(ackType, ackProgress) {
 		atomic.StoreUint32(&m.ackd, 1)
+	}
+
+	// Check if has to reply to flow control.
+	if jsi.fc {
+		jsi.mu.Lock()
+		fcInbox := jsi.fcInbox
+		doFC := fcInbox != ""
+		if doFC {
+			jsi.fcInbox = ""
+		}
+		jsi.mu.Unlock()
+
+		if doFC {
+			fmt.Println("PUBLISH!!!", fcInbox)
+			nc.Publish(fcInbox, nil)
+		}
 	}
 
 	return err

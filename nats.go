@@ -2470,6 +2470,7 @@ func (nc *Conn) processMsg(data []byte) {
 	var err error
 	var ctrl bool
 	var hasFC bool
+	var hasHBs bool
 
 	if nc.ps.ma.hdr > 0 {
 		hbuf := msgPayload[:nc.ps.ma.hdr]
@@ -2495,6 +2496,7 @@ func (nc *Conn) processMsg(data []byte) {
 	jsi := sub.jsi
 	if jsi != nil {
 		ctrl = isControlMessage(m)
+		hasHBs = jsi.hbs
 		hasFC = jsi.fc
 	}
 
@@ -2544,9 +2546,16 @@ func (nc *Conn) processMsg(data []byte) {
 				sub.pTail = m
 			}
 		}
-		if hasFC {
-			jsi.trackSequences(m)
+		if hasHBs {
+			// Store the ACK metadata from the message
+			// to compare later on with 
+			jsi.trackSequences(m.Reply)
 		}
+	} else if hasFC && m.Reply != "" {
+		// This is a flow control message, we will make
+		// a reply after the next ACK from client.
+		fmt.Println(time.Now(), "FLOW:", m.Reply, len(sub.mch), sub.pMsgs, sub.pBytes, float64(sub.pBytes)/1024/1024, sub.pBytesLimit, m.Reply, m.Subject)
+		jsi.scheduleFlowControlResponse(m.Reply)
 	}
 
 	// Clear SlowConsumer status.
@@ -2554,10 +2563,9 @@ func (nc *Conn) processMsg(data []byte) {
 
 	sub.mu.Unlock()
 
-	// Handle flow control and heartbeat messages automatically
-	// for JetStream Push consumers.
-	if ctrl {
-		nc.processControlFlow(m, sub, jsi)
+	// Handle control heartbeat messages.
+	if ctrl && hasHBs && m.Reply == "" {
+		nc.processSequenceMismatch(m, sub, jsi)
 	}
 
 	return
