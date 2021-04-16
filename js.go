@@ -1027,22 +1027,57 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, isSync 
 			return nil, err
 		}
 
-		var info consumerResponse
-		err = json.Unmarshal(resp.Data, &info)
+		var cinfo consumerResponse
+		err = json.Unmarshal(resp.Data, &cinfo)
 		if err != nil {
 			sub.Unsubscribe()
 			return nil, err
 		}
-		if info.Error != nil {
+		if cinfo.Error != nil {
+			// Remove interest from subscription created eagerly before
+			// since may have an incorrect delivery subject.
 			sub.Unsubscribe()
-			return nil, fmt.Errorf("nats: %s", info.Error.Description)
-		}
 
-		// Hold onto these for later.
-		sub.jsi.stream = info.Stream
-		sub.jsi.consumer = info.Name
-		sub.jsi.deliver = info.Config.DeliverSubject
-		sub.jsi.durable = isDurable
+			// Multiple QueueSubscribers could compete in creating the first consumer
+			// that will be shared using the same durable name. If this happens, then
+			// do a lookup of the consumer info and retry.
+			if consumer != _EMPTY_ && strings.Contains(cinfo.Error.Description, `consumer already exists`) {
+				// Lookup for latest consumer info.
+				info, err = js.ConsumerInfo(stream, consumer)
+				if err != nil && err.Error() != "nats: consumer not found" {
+					return nil, err
+				}
+				if info != nil {
+					ccfg = &info.Config
+					attached = true
+
+					// Validate that the subject does still match.
+					if ccfg.FilterSubject != _EMPTY_ && subj != ccfg.FilterSubject {
+						return nil, ErrSubjectMismatch
+					}
+
+					if !isPullMode {
+						deliver = ccfg.DeliverSubject
+						sub, err = js.nc.subscribe(deliver, queue, cb, ch, isSync, &jsSub{js: js, hbs: hasHeartbeats, fc: hasFC})
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+			} else {
+				return nil, fmt.Errorf("nats: %s", cinfo.Error.Description)
+			}
+			sub.jsi.stream = info.Stream
+			sub.jsi.consumer = info.Name
+			sub.jsi.deliver = info.Config.DeliverSubject
+			sub.jsi.durable = isDurable
+		} else {
+			// Hold onto these for later.
+			sub.jsi.stream = cinfo.Stream
+			sub.jsi.consumer = cinfo.Name
+			sub.jsi.deliver = cinfo.Config.DeliverSubject
+			sub.jsi.durable = isDurable
+		}
 	} else {
 		sub.jsi.stream = stream
 		sub.jsi.consumer = consumer
