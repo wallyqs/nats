@@ -4592,6 +4592,18 @@ func TestJetStream_ClusterReconnect(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("qsub sync durable", func(t *testing.T) {
+		for _, r := range replicas {
+			t.Run(fmt.Sprintf("n=%d r=%d", n, r), func(t *testing.T) {
+				stream := &nats.StreamConfig{
+					Name:     fmt.Sprintf("baz-r%d", r),
+					Replicas: r,
+				}
+				withJSClusterAndStream(t, fmt.Sprintf("QSSUBR%d", r), n, stream, testJetStream_ClusterReconnectDurableQueueSyncSubscriber)
+			})
+		}
+	})
 }
 
 func testJetStream_ClusterReconnectDurableQueueSubscriber(t *testing.T, subject string, srvs ...*jsServer) {
@@ -4686,7 +4698,197 @@ func testJetStream_ClusterReconnectDurableQueueSubscriber(t *testing.T, subject 
 	timeout := time.Now().Add(5 * time.Second)
 	for time.Now().Before(timeout) {
 		stream, err = js.StreamInfo(subject)
-		if err == nats.ErrTimeout {
+		if err == nats.ErrTimeout || err == context.DeadlineExceeded {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		} else if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		break
+	}
+	if stream == nil {
+		t.Logf("WARN: Failed to get stream info: %v", err)
+	}
+
+	var failedPubs int
+	for i := 10; i < totalMsgs; i++ {
+		var published bool
+		payload := fmt.Sprintf("i:%d", i)
+		timeout = time.Now().Add(5 * time.Second)
+
+	Retry:
+		for time.Now().Before(timeout) {
+			_, err = js.Publish(subject, []byte(payload))
+
+			// Skip temporary errors.
+			if err != nil && (err == nats.ErrNoStreamResponse || err == nats.ErrTimeout || err.Error() == `raft: not leader`) {
+				time.Sleep(100 * time.Millisecond)
+				continue Retry
+			} else if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			published = true
+			break Retry
+		}
+
+		if !published {
+			failedPubs++
+		}
+	}
+
+	<-ctx.Done()
+
+	// Wait a bit to get heartbeats.
+	time.Sleep(2 * time.Second)
+
+	// Drain to allow AckSync response to be received.
+	nc.Drain()
+
+	got := len(msgs)
+	if got != totalMsgs {
+		t.Logf("WARN: Expected %v, got: %v (failed publishes: %v)", totalMsgs, got, failedPubs)
+	}
+	if got < totalMsgs-failedPubs {
+		t.Errorf("Expected %v, got: %v", totalMsgs-failedPubs, got)
+	}
+}
+
+func testJetStream_ClusterReconnectDurableQueueSyncSubscriber(t *testing.T, subject string, srvs ...*jsServer) {
+	var (
+		srvA          = srvs[0]
+		totalMsgs     = 20
+		reconnected   = make(chan struct{})
+		reconnectDone bool
+	)
+	nc, err := nats.Connect(srvA.ClientURL(),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			t.Logf("RECONNECTED!")
+			reconnected <- struct{}{}
+
+			// Bring back the server after the reconnect event.
+			if !reconnectDone {
+				reconnectDone = true
+				srvA.Restart()
+			}
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			t.Logf("WARN: Got error %v", err)
+			if info, ok := err.(*nats.ErrConsumerSequenceMismatch); ok {
+				t.Logf("WARN: %+v", info)
+			}
+			// Take out this QueueSubscriber from the group.
+			sub.Drain()
+		}),
+	)
+	if err != nil {
+		t.Error(err)
+	}
+
+	defer nc.Close()
+
+	js, err := nc.JetStream(nats.MaxWait(2 * time.Second))
+	if err != nil {
+		t.Error(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		payload := fmt.Sprintf("i:%d", i)
+		js.Publish(subject, []byte(payload))
+	}
+
+	ctx, done := context.WithTimeout(context.Background(), 10*time.Second)
+	defer done()
+
+	msgs := make(chan *nats.Msg, totalMsgs)
+
+	// Create some queue subscribers.
+	dname := "dur" + subject
+	for i := 0; i < 5; i++ {
+		expected := totalMsgs
+		qsub := fmt.Sprintf("qsub:%d", i)
+
+		go func() {
+			sub, err := js.QueueSubscribeSync(subject, "wg",
+				nats.Durable(dname),
+				nats.AckWait(1*time.Second),
+				nats.ManualAck(),
+				nats.IdleHeartbeat(100*time.Millisecond),
+			)
+			if err != nil {
+				if err == nats.ErrTimeout || err == context.DeadlineExceeded {
+					// Queue Subscriber failed to connect during the shutdown
+					// of one of the servers.
+					return
+				} else {
+					t.Fatal(err)
+				}
+			}
+			t.Logf("STARTING: %v", qsub)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				m, err := sub.NextMsg(1 * time.Second)
+				if err != nil {
+					// t.Logf("WARN (%v): %v : %v", qsub, err, sub)
+					if err == nats.ErrBadSubscription {
+						return
+					}
+					continue
+				}
+
+				msgs <- m
+
+				meta, err := m.Metadata()
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("GOT: %v::%v::%v", qsub, meta.Sequence.Stream, meta.Sequence.Consumer)
+
+				switch {
+				case len(msgs) == 2:
+					t.Logf("Shutting down...")
+					// Do not ack and wait for redelivery on reconnect.
+					srvA.Shutdown()
+					srvA.WaitForShutdown()
+					return
+				case len(msgs) == expected:
+					done()
+				}
+
+				err = m.AckSync()
+				if err != nil {
+					// During the reconnection, both of these errors can occur.
+					if err == nats.ErrNoResponders || err == nats.ErrTimeout {
+						// Wait for reconnection event to occur to continue.
+						select {
+						case <-reconnected:
+							t.Logf("Reconnected!")
+							return
+						case <-time.After(1 * time.Second):
+							return
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}
+		}()
+
+		if err != nil && (err != nats.ErrTimeout && err != context.DeadlineExceeded) {
+			t.Error(err)
+		}
+	}
+
+	// Check for persisted messages, this could fail a few times.
+	var stream *nats.StreamInfo
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		stream, err = js.StreamInfo(subject)
+		if err == nats.ErrTimeout || err == context.DeadlineExceeded {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		} else if err != nil {

@@ -1261,6 +1261,10 @@ func RateLimit(n uint64) SubOpt {
 }
 
 // BindStream binds a consumer to a stream explicitly based on a name.
+// By default, the clients figure out the name of the stream based on the
+// subject so this option is not needed, but in case of Streams that are
+// mirrors or sourced from multiple streams BindStream makes it possible
+// to consume from those type of streams.
 func BindStream(name string) SubOpt {
 	return subOptFn(func(opts *subOpts) error {
 		opts.stream = name
@@ -1284,6 +1288,7 @@ func IdleHeartbeat(duration time.Duration) SubOpt {
 	})
 }
 
+// ConsumerInfo retrieves the latest consumer info state.
 func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
 	sub.mu.Lock()
 	// TODO(dlc) - Better way to mark especially if we attach.
