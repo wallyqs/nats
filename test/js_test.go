@@ -422,6 +422,17 @@ func TestJetStreamSubscribe(t *testing.T) {
 	}
 	expectConsumers(t, 3)
 
+	// Subscribing again with same subject and durable name is not an error,
+	// but does not create a new consumer either.
+	sub, err = js.SubscribeSync("foo", nats.Durable(dname))
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if deliver != sub.Subject {
+		t.Fatal("Expected delivery subject to be the same after reattach")
+	}
+	expectConsumers(t, 3)
+
 	// Cleanup the consumer to be able to create again with a different delivery subject.
 	// this should be the same as `sub.Unsubscribe()'.
 	js.DeleteConsumer("TEST", dname)
@@ -4562,6 +4573,7 @@ func testJetStreamMirror_Source(t *testing.T, nodes ...*jsServer) {
 }
 
 func TestJetStream_ClusterMultipleSubscribe(t *testing.T) {
+	// FIXME: Test with cluster nodes = 3
 	nodes := []int{1}
 
 	for _, n := range nodes {
@@ -4574,14 +4586,14 @@ func TestJetStream_ClusterMultipleSubscribe(t *testing.T) {
 			withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultipleQueueSubscribe)
 		})
 
-		t.Run(fmt.Sprintf("psub n=%d", n), func(t *testing.T) {
-			name := fmt.Sprintf("PSUB%d", n)
-			stream := &nats.StreamConfig{
-				Name:     name,
-				Replicas: n,
-			}
-			withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultiplePullSubscribe)
-		})
+		// t.Run(fmt.Sprintf("psub n=%d", n), func(t *testing.T) {
+		// 	name := fmt.Sprintf("PSUB%d", n)
+		// 	stream := &nats.StreamConfig{
+		// 		Name:     name,
+		// 		Replicas: n,
+		// 	}
+		// 	withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultiplePullSubscribe)
+		// })
 	}
 }
 
@@ -4607,12 +4619,12 @@ func testJetStream_ClusterMultipleQueueSubscribe(t *testing.T, subject string, s
 	for i := 0; i < size; i++ {
 		wg.Add(1)
 		go func(n int) {
+			defer wg.Done()
 			sub, err := js.QueueSubscribeSync(subject, "wq", nats.Durable("shared"))
 			if err != nil {
 				errCh <- err
 			}
 			subs[n] = sub
-			wg.Done()
 		}(i)
 	}
 
@@ -4625,19 +4637,17 @@ func testJetStream_ClusterMultipleQueueSubscribe(t *testing.T, subject string, s
 	for i := 0; i < size*2; i++ {
 		js.Publish(subject, []byte("test"))
 	}
-
-	// Try to get a message
 	wg.Wait()
 
 	delivered := 0
-	for _, sub := range subs {
-		_, err := sub.NextMsg(10 * time.Millisecond)
+	for i, sub := range subs {
+		m, err := sub.NextMsg(10 * time.Millisecond)
 		if err != nil {
 			continue
 		}
+		t.Logf("MSG (i:%v): %+v", i, m)
 		delivered++
 	}
-
 	if delivered < 2 {
 		t.Fatalf("Expected more than one subscriber to receive a message, got: %v", delivered)
 	}
@@ -4691,8 +4701,6 @@ func testJetStream_ClusterMultiplePullSubscribe(t *testing.T, subject string, sr
 	for i := 0; i < size*2; i++ {
 		js.Publish(subject, []byte("test"))
 	}
-
-	// Try to get a message
 	wg.Wait()
 
 	delivered := 0

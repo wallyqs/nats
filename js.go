@@ -1033,12 +1033,19 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, isSync 
 			sub.Unsubscribe()
 			return nil, err
 		}
+		fmt.Printf("DATA: %+v || %+v\n", string(resp.Data), resp)
+		fmt.Printf("CINFO: %+v\n", cinfo)
+		// if cinfo.Error == nil && cinfo.ConsumerInfo == nil {
+		// 	sub.Unsubscribe()
+		// 	return nil, fmt.Errorf("nats: invalid response from JS API %s", string(resp.Data))
+		// }
+
 		if cinfo.Error != nil {
 			// Remove interest from subscription created eagerly before
 			// since may have an incorrect delivery subject.
 			sub.Unsubscribe()
 
-			// Multiple QueueSubscribers could compete in creating the first consumer
+			// Multiple subscribers could compete in creating the first consumer
 			// that will be shared using the same durable name. If this happens, then
 			// do a lookup of the consumer info and retry.
 			if consumer != _EMPTY_ && strings.Contains(cinfo.Error.Description, `consumer already exists`) {
@@ -1058,7 +1065,8 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, isSync 
 
 					if !isPullMode {
 						deliver = ccfg.DeliverSubject
-						sub, err = js.nc.subscribe(deliver, queue, cb, ch, isSync, &jsSub{js: js, hbs: hasHeartbeats, fc: hasFC})
+						sub, err = js.nc.subscribe(deliver, queue, cb, ch, isSync,
+							&jsSub{js: js, hbs: hasHeartbeats, fc: hasFC})
 						if err != nil {
 							return nil, err
 						}
@@ -1067,23 +1075,27 @@ func (js *js) subscribe(subj, queue string, cb MsgHandler, ch chan *Msg, isSync 
 			} else {
 				return nil, fmt.Errorf("nats: %s", cinfo.Error.Description)
 			}
-			sub.jsi.stream = info.Stream
-			sub.jsi.consumer = info.Name
-			sub.jsi.deliver = info.Config.DeliverSubject
-			sub.jsi.durable = isDurable
+			// fmt.Printf("--------- _B ------ %+v\n", sub.jsi)
+			// fmt.Printf("--------- _C ------ %+v\n", info)
 		} else {
 			// Hold onto these for later.
-			sub.jsi.stream = cinfo.Stream
-			sub.jsi.consumer = cinfo.Name
-			sub.jsi.deliver = cinfo.Config.DeliverSubject
-			sub.jsi.durable = isDurable
+			info = cinfo.ConsumerInfo
+			// fmt.Printf("--------- B ------ %+v\n", sub.jsi)
+			// fmt.Printf("--------- C ------ %+v\n", info)
 		}
+		sub.jsi.stream = info.Stream
+		sub.jsi.consumer = info.Name
+		sub.jsi.deliver = info.Config.DeliverSubject
+		sub.jsi.durable = isDurable
+		// fmt.Printf("--------- P ------ %+v\n", sub.jsi)
 	} else {
 		sub.jsi.stream = stream
 		sub.jsi.consumer = consumer
 		sub.jsi.deliver = ccfg.DeliverSubject
+		// fmt.Printf("--------- BB %v (attached:%v)------ %+v\n", sub.Subject, attached, sub.jsi)
 	}
 	sub.jsi.attached = attached
+	// fmt.Printf("--------- FINAL: %+v\n", sub.jsi)
 
 	return sub, nil
 }
