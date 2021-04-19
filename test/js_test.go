@@ -4670,7 +4670,7 @@ func testJetStream_ClusterMultipleSubscribe(t *testing.T, subject string, srvs .
 	case <-ctx.Done():
 	case err := <-errCh:
 		if err != nil {
-			t.Fatalf("Unexpected error with multiple queue subscribers: %v", err)
+			t.Fatalf("Unexpected error with multiple subscribers: %v", err)
 		}
 	}
 }
@@ -4691,30 +4691,30 @@ func testJetStream_ClusterMultipleQueueSubscribe(t *testing.T, subject string, s
 		t.Fatal(err)
 	}
 
-	size := 50
+	size := 5
 	subs := make([]*nats.Subscription, size)
 	errCh := make(chan error, size)
 
-	// Starting with one
-	// size = 49
-	// sub, err := js.QueueSubscribeSync(subject, "wq", nats.Durable("shared"))
-	// if err != nil {
-	// 	t.Fatal(err)
-	// }
-	// subs[0] = sub
-
 	for i := 0; i < size; i++ {
 		wg.Add(1)
-		qsub := fmt.Sprintf("qsub:%v", i)
 		go func(n int) {
 			defer wg.Done()
-			t.Logf("STARTING! %+v", qsub)
-			sub, err := js.QueueSubscribeSync(subject, "wq", nats.Durable("shared"))
+			var sub *nats.Subscription
+			var err error
+			for attempt := 0; attempt < 5; attempt++ {
+				sub, err = js.QueueSubscribeSync(subject, "wq", nats.Durable("shared"))
+				if err != nil {
+					t.Logf("RETRY (attempt:%v): %v", attempt, err)
+					time.Sleep(1 * time.Second)
+					continue
+				}
+				break
+			}
 			if err != nil {
 				errCh <- err
+			} else {
+				subs[n] = sub
 			}
-			t.Logf("STARTED! %+v", qsub)
-			subs[n] = sub
 		}(i)
 	}
 
@@ -4724,18 +4724,22 @@ func testJetStream_ClusterMultipleQueueSubscribe(t *testing.T, subject string, s
 		done()
 	}()
 
+	wg.Wait()
 	for i := 0; i < size*2; i++ {
 		js.Publish(subject, []byte("test"))
 	}
-	wg.Wait()
 
 	delivered := 0
 	for _, sub := range subs {
-		_, err := sub.NextMsg(10 * time.Millisecond)
-		if err != nil {
-			continue
+		for attempt := 0; attempt < 4; attempt++ {
+			_, err = sub.NextMsg(250 * time.Millisecond)
+			if err != nil {
+				t.Logf("WARN: Timeout waiting for next message: %v", err)
+				continue
+			}
+			delivered++
+			break
 		}
-		delivered++
 	}
 	if delivered < 2 {
 		t.Fatalf("Expected more than one subscriber to receive a message, got: %v", delivered)
