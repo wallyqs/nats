@@ -4573,35 +4573,42 @@ func testJetStreamMirror_Source(t *testing.T, nodes ...*jsServer) {
 }
 
 func TestJetStream_ClusterMultipleSubscribe(t *testing.T) {
-	nodes := []int{1}
+	nodes := []int{1, 3}
+	replicas := []int{1, 3}
 
 	for _, n := range nodes {
-		t.Run(fmt.Sprintf("sub n=%d", n), func(t *testing.T) {
-			name := fmt.Sprintf("SUB%d", n)
-			stream := &nats.StreamConfig{
-				Name:     name,
-				Replicas: n,
+		for _, r := range replicas {
+			if r > 1 && n == 1 {
+				continue
 			}
-			withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultipleSubscribe)
-		})
 
-		t.Run(fmt.Sprintf("qsub n=%d", n), func(t *testing.T) {
-			name := fmt.Sprintf("MSUB%d", n)
-			stream := &nats.StreamConfig{
-				Name:     name,
-				Replicas: n,
-			}
-			withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultipleQueueSubscribe)
-		})
+			t.Run(fmt.Sprintf("sub n=%d r=%d", n, r), func(t *testing.T) {
+				name := fmt.Sprintf("SUB%d", n)
+				stream := &nats.StreamConfig{
+					Name:     name,
+					Replicas: n,
+				}
+				withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultipleSubscribe)
+			})
 
-		t.Run(fmt.Sprintf("psub n=%d", n), func(t *testing.T) {
-			name := fmt.Sprintf("PSUB%d", n)
-			stream := &nats.StreamConfig{
-				Name:     name,
-				Replicas: n,
-			}
-			withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultiplePullSubscribe)
-		})
+			t.Run(fmt.Sprintf("qsub n=%d r=%d", n, r), func(t *testing.T) {
+				name := fmt.Sprintf("MSUB%d", n)
+				stream := &nats.StreamConfig{
+					Name:     name,
+					Replicas: r,
+				}
+				withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultipleQueueSubscribe)
+			})
+
+			t.Run(fmt.Sprintf("psub n=%d r=%d", n, r), func(t *testing.T) {
+				name := fmt.Sprintf("PSUB%d", n)
+				stream := &nats.StreamConfig{
+					Name:     name,
+					Replicas: n,
+				}
+				withJSClusterAndStream(t, name, n, stream, testJetStream_ClusterMultiplePullSubscribe)
+			})
+		}
 	}
 }
 
@@ -4686,15 +4693,27 @@ func testJetStream_ClusterMultipleQueueSubscribe(t *testing.T, subject string, s
 
 	size := 50
 	subs := make([]*nats.Subscription, size)
-	errCh := make(chan error, 1)
+	errCh := make(chan error, size)
+
+	// Starting with one
+	// size = 49
+	// sub, err := js.QueueSubscribeSync(subject, "wq", nats.Durable("shared"))
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	// subs[0] = sub
+
 	for i := 0; i < size; i++ {
 		wg.Add(1)
+		qsub := fmt.Sprintf("qsub:%v", i)
 		go func(n int) {
 			defer wg.Done()
+			t.Logf("STARTING! %+v", qsub)
 			sub, err := js.QueueSubscribeSync(subject, "wq", nats.Durable("shared"))
 			if err != nil {
 				errCh <- err
 			}
+			t.Logf("STARTED! %+v", qsub)
 			subs[n] = sub
 		}(i)
 	}
