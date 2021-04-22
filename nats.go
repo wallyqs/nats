@@ -562,7 +562,7 @@ type Subscription struct {
 type Msg struct {
 	Subject string
 	Reply   string
-	Header  http.Header
+	Header  Header
 	Data    []byte
 	Sub     *Subscription
 	next    *Msg
@@ -582,7 +582,7 @@ func (m *Msg) headerBytes() ([]byte, error) {
 		return nil, ErrBadHeaderMsg
 	}
 
-	err = m.Header.Write(&b)
+	err = http.Header(m.Header).Write(&b)
 	if err != nil {
 		return nil, ErrBadHeaderMsg
 	}
@@ -2466,7 +2466,7 @@ func (nc *Conn) processMsg(data []byte) {
 	copy(msgPayload, data)
 
 	// Check if we have headers encoded here.
-	var h http.Header
+	var h Header
 	var err error
 	var ctrl bool
 	var hasFC bool
@@ -2862,11 +2862,77 @@ func (nc *Conn) Publish(subj string, data []byte) error {
 	return nc.publish(subj, _EMPTY_, nil, data)
 }
 
+// Header represents the optional Header for a NATS message,
+// based on the implementation of http.Header.
+type Header map[string][]string
+
+// Add adds the key, value pair to the header.
+// It appends to any existing values associated with key.
+func (h Header) Add(key, value string) {
+	h[key] = append(h[key], value)
+}
+
+// Set sets the header entries associated with key to
+// the single element value. It replaces any existing
+// values associated with key.
+func (h Header) Set(key, value string) {
+	h[key] = []string{value}
+}
+
+// Get gets the first value associated with the given key.
+// It is case insensitive; but first it attempts to match the provided key as is,
+// uses textproto.CanonicalMIMEHeaderKey#Get for the lookup.
+// If there are no values associated with the key, Get returns "".
+// To lookup a key in case-sensitive way, access the map directly.
+func (h Header) Get(key string) string {
+	if h == nil {
+		return _EMPTY_
+	}
+	// Exact match would be the fast-path and first
+	// to be picked in case there are duplicates.
+	if v := h[key]; v != nil {
+		return v[0]
+	}
+	// Match using canonical normalization of HTTP v1 if present.
+	if v := h[textproto.CanonicalMIMEHeaderKey(key)]; v != nil {
+		return v[0]
+	}
+	// Case-insensitive match.
+	for k, v := range h {
+		if strings.EqualFold(k, key) {
+			return v[0]
+		}
+	}
+	return _EMPTY_
+}
+
+// Values returns all values associated with the given key,
+// matching all keys case-insensitively.
+// To lookup a key in case-sensitive way, access the map directly.
+func (h Header) Values(key string) []string {
+	var values []string
+	for k, v := range h {
+		if strings.EqualFold(k, key) {
+			values = append(values, v...)
+		}
+	}
+	return values
+}
+
+// Del deletes the values associated with a key case-insensitively.
+func (h Header) Del(key string) {
+	for k := range h {
+		if strings.EqualFold(k, key) {
+			delete(h, k)
+		}
+	}
+}
+
 // NewMsg creates a message for publishing that will use headers.
 func NewMsg(subject string) *Msg {
 	return &Msg{
 		Subject: subject,
-		Header:  make(http.Header),
+		Header:  make(Header),
 	}
 }
 
@@ -2885,7 +2951,7 @@ const (
 )
 
 // decodeHeadersMsg will decode and headers.
-func decodeHeadersMsg(data []byte) (http.Header, error) {
+func decodeHeadersMsg(data []byte) (Header, error) {
 	tp := textproto.NewReader(bufio.NewReader(bytes.NewReader(data)))
 	l, err := tp.ReadLine()
 	if err != nil || len(l) < hdrPreEnd || l[:hdrPreEnd] != hdrLine[:hdrPreEnd] {
@@ -2910,7 +2976,7 @@ func decodeHeadersMsg(data []byte) (http.Header, error) {
 			mh.Add(descrHdr, description)
 		}
 	}
-	return http.Header(mh), nil
+	return Header(mh), nil
 }
 
 // readMIMEHeader returns a MIMEHeader that preserves the
