@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -279,7 +280,7 @@ type Options struct {
 	// Secure enables TLS secure connections that skip server
 	// verification by default. NOT RECOMMENDED.
 	Secure bool
-
+ 
 	// TLSConfig is a custom TLS configuration to use for secure
 	// transports.
 	TLSConfig *tls.Config
@@ -1514,11 +1515,43 @@ func (nc *Conn) makeTLSConn() error {
 			tlsCopy.ServerName = h
 		}
 	}
+
+	// TODO: Have to return the staple to the client???
+	mustStaple := true
+	if mustStaple {
+		// tlsCopy.VerifyConnection = func(s tls.ConnectionState) error  {
+		// 	// fmt.Printf ("nats.go :: State    %+v!!!!!!!!!!!!!!!!!!!\n", s)
+		// 	// fmt.Println("nats.go :: verifying!!!!!!!!!!!!!!!!!!!", s.OCSPResponse)
+		// 	// cert := connState.PeerCertificates[0]
+		// 	// fmt.Println(cert.OCSPStaple)
+		// 	return nil
+		// }
+		tlsCopy.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			for _, rawCert := range rawCerts {
+				b := sha256.Sum256(rawCert)
+				fmt.Printf("nats.go :: A :: %x\n", b)
+			}
+			// for _, chain := range verifiedChains {
+			// 	fmt.Println("nats.go :: B", chain)
+			// }
+			return nil
+		}
+	}
+	
+	// certs := tlsCopy.Certificates
+	fmt.Println("nats.go :: ???????????????", tlsCopy)
+
 	nc.conn = tls.Client(nc.conn, tlsCopy)
 	conn := nc.conn.(*tls.Conn)
 	if err := conn.Handshake(); err != nil {
 		return err
 	}
+
+	if mustStaple {
+		ocspResponse := conn.OCSPResponse()
+		fmt.Println("nats.go :: OCSPResponse: ", ocspResponse)
+	}
+	
 	nc.bw = nc.newBuffer()
 	return nil
 }
