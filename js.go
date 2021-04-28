@@ -1747,6 +1747,7 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...AckOpt) error {
 	}
 
 	m.Sub.mu.Lock()
+	sub := m.Sub
 	nc := m.Sub.conn
 	m.Sub.mu.Unlock()
 
@@ -1786,6 +1787,11 @@ func (m *Msg) ackReply(ackType []byte, sync bool, opts ...AckOpt) error {
 			jsi.fcInbox = ""
 		}
 		jsi.mu.Unlock()
+
+		// if sub.pBytes > DefaultSubPendingBytesLimit {
+		meta, _ := m.Metadata()
+		fmt.Println(meta.Sequence.Consumer, sub.pMsgs, DefaultSubPendingBytesLimit-sub.pBytes)
+		// }
 
 		if doFC {
 			nc.Publish(fcInbox, nil)
