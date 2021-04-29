@@ -1548,8 +1548,13 @@ func (nc *Conn) makeTLSConn() error {
 	}
 
 	if mustStaple {
-		ocspResponse := conn.OCSPResponse()
-		fmt.Println("nats.go :: OCSPResponse: ", ocspResponse)
+		ocspResponseBytes := conn.OCSPResponse()
+		// ocspResponse, err := ocsp.ParseResponse(ocspResponseBytes, issuer)
+		// if err != nil {
+		// 	fmt.Println("Error parsing response:", err)
+		// 	return nil, err
+		// }
+		// fmt.Println("nats.go :: OCSPResponse: ", ocspResponse.Status == ocsp.Good)
 	}
 	
 	nc.bw = nc.newBuffer()
