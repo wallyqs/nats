@@ -16,6 +16,7 @@ package test
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -964,6 +965,89 @@ func TestJetStreamAckPending_Push(t *testing.T) {
 	_, err = sub.NextMsg(100 * time.Millisecond)
 	if err != nats.ErrTimeout {
 		t.Errorf("Expected timeout, got: %v", err)
+	}
+}
+
+func TestJetStreamAckPending_PushAsyncSubscribe(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer s.Shutdown()
+
+	if config := s.JetStreamConfig(); config != nil {
+		defer os.RemoveAll(config.StoreDir)
+	}
+
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	const totalMsgs = 3
+	for i := 0; i < totalMsgs; i++ {
+		if _, err := js.Publish("foo", []byte(fmt.Sprintf("msg %d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	recvd := make(chan *nats.Msg, 3)
+
+	sub, err := js.Subscribe("foo", func(m *nats.Msg) {
+		recvd <- m
+		time.Sleep(100 * time.Millisecond)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Unsubscribe()
+
+	var e error
+	var got, expected int
+Loop:
+	for range time.NewTicker(100 * time.Millisecond).C {
+		select {
+		case <-ctx.Done():
+			e = errors.New("Timeout waiting for pending acks")
+			break Loop
+		default:
+		}
+
+		info, err := sub.ConsumerInfo()
+		if err != nil {
+			e = err
+			continue
+		}
+
+		if info.Delivered.Stream != 3 {
+			continue
+		}
+
+		got = info.NumAckPending
+		expected = 0
+		if got != expected {
+			e = fmt.Errorf("Expected %v, got: %v", expected, got)
+			continue
+		}
+		e = nil
+		return
+	}
+	if e != nil {
+		t.Fatal(e)
 	}
 }
 
