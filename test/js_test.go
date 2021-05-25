@@ -2252,7 +2252,7 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 	}
 	defer ncm.Close()
 
-	jsm, err := ncm.BindJetStream()
+	jsm, err := ncm.JetStream()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2343,16 +2343,23 @@ func TestJetStreamImportDirectOnly(t *testing.T) {
 		}
 	}
 
-	// Cannot subscribe with JS context from another account right now.
-	if _, err := js.SubscribeSync("ORDERS"); err != nats.ErrJetStreamNotEnabled {
-		t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrJetStreamNotEnabled, err)
+	jsb, err := nc.BindJetStream()
+	if _, err := jsb.SubscribeSync("ORDERS"); err == nil || err.Error() != `nats: a bound JS requires a stream name` {
+		t.Fatalf("Expected an error, got '%v'", err)
 	}
-	if _, err = js.SubscribeSync("ORDERS", nats.BindStream("ORDERS")); err != nats.ErrJetStreamNotEnabled {
-		t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrJetStreamNotEnabled, err)
+	pb, err := jsb.PullSubscribe("ORDERS", "d1", nats.BindStream("ORDERS"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err = js.PullSubscribe("ORDERS", "d1", nats.BindStream("ORDERS")); err != nats.ErrJetStreamNotEnabled {
-		t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrJetStreamNotEnabled, err)
+	msgs, err := pb.Fetch(1)
+	if err != nil {
+		t.Fatal(err)		
 	}
+	msg := msgs[0]
+	t.Logf("========== %+v", msg.Data)
+	// if _, err = jsb.SubscribeSync("ORDERS", nats.BindStream("ORDERS"), nats.Durable("p.d3")); err != nats.ErrJetStreamNotEnabled {
+	// 	t.Fatalf("Expected an error of '%v', got '%v'", nats.ErrJetStreamNotEnabled, err)
+	// }
 }
 
 func TestJetStreamCrossAccountMirrorsAndSources(t *testing.T) {

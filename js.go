@@ -188,9 +188,9 @@ func (nc *Conn) jetStream(opts ...JSOpt) (*js, error) {
 	return js, nil
 }
 
-// BindJetStream returns a JetStreamContext for messaging and stream management that will NOT create
-// underlying objects like stream or durable. It assumes they exist already.
-func (nc *Conn) BindJetStream(opts ...JSOpt) (JetStreamContext, error) {
+// BindJetStream returns a bound JetStream context that will not create
+// underlying objects like streams or consumers and assumes they exist already.
+func (nc *Conn) BindJetStream(opts ...JSOpt) (JetStream, error) {
 	js, err := nc.jetStream(opts...)
 	if err != nil {
 		return nil, err
