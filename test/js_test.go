@@ -5885,6 +5885,82 @@ func testJetStreamFetchOptions(t *testing.T, srvs ...*jsServer) {
 			t.Fatalf("Expected timeout error, got: %v", err)
 		}
 	})
+
+	t.Run("num waiting", func(t *testing.T) {
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+		sub, err := js.PullSubscribe(subject, "numwait", nats.PullMaxWaiting(5))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Unsubscribe()
+
+		errCh := make(chan error, 1024)
+
+		ctx, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				info, err := sub.ConsumerInfo()
+				if err != nil {
+					t.Logf("WARN: %v", err)
+				} else {
+					t.Logf("INFO: %+v", info)
+				}
+
+				msgs, err := sub.Fetch(2, nats.MaxWait(250*time.Millisecond))
+				if err != nil && (err != nats.ErrTimeout && !strings.Contains(err.Error(), "nats: Request Timeout")) {
+					t.Logf("Unexpected error: %v", err)
+					// errCh <- err
+				}
+				for _, msg := range msgs {
+					msg.Ack()
+				}
+			}
+		}()
+
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				info, err := sub.ConsumerInfo()
+				if err != nil {
+					t.Logf("WARN: %v", err)
+				} else {
+					t.Logf("INFO: %+v", info)
+				}
+
+				msgs, err := sub.Fetch(2, nats.MaxWait(250*time.Millisecond))
+				if err != nil && (err != nats.ErrTimeout && !strings.Contains(err.Error(), "nats: Request Timeout")) {
+					t.Logf("Unexpected error: %v", err)
+					// errCh <- err
+				}
+				for _, msg := range msgs {
+					msg.Ack()
+				}
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-errCh:
+			t.Logf("Got: %v", err)
+		}
+	})
 }
 
 func TestJetStreamPublishAsync(t *testing.T) {
