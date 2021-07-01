@@ -6327,3 +6327,83 @@ func TestJetStreamDomain(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 }
+
+func TestJetStreamPullSubscribeWorkQueue(t *testing.T) {
+	withJSCluster(t, "WQPULL", 3, testJetStreamFetchWQ)
+}
+
+func testJetStreamFetchWQ(t *testing.T, srvs ...*jsServer) {
+	srv := srvs[0]
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Error(err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	subject := "WQ"
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:      subject,
+		Replicas:  3,
+		Retention: nats.WorkQueuePolicy,
+		MaxAge:    2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sendMsgs := func(t *testing.T, totalMsgs int) {
+		t.Helper()
+		for i := 0; i < totalMsgs; i++ {
+			payload := fmt.Sprintf("i:%d", i)
+			_, err := js.Publish(subject, []byte(payload))
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+		}
+	}
+
+	// - send, then consume with 50 PS
+	// - send + consume with 50 PS
+	// - send + expire
+	// - check for errors
+	t.Run("fetch", func(t *testing.T) {
+		defer js.PurgeStream(subject)
+
+		expected := 10
+		sendMsgs(t, expected)
+		sub, err := js.PullSubscribe(subject, "durable")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		var total int
+	Loop:
+		for {
+			select {
+			case <-ctx.Done():
+			default:
+				break Loop
+			}
+			sendMsgs(t, 2)
+			msgs, err := sub.Fetch(1)
+			t.Logf("||||||||||||||||||||||| %+v", len(msgs))
+			if err != nil && err != nats.ErrTimeout {
+				t.Logf("ERROR: %v", err)
+			}
+			for _, msg := range msgs {
+				t.Logf(">>>>>>>>>>>>>>>>>>>>>>>> %v || %v", msg, total)
+				total++
+				msg.Ack()
+			}
+		}
+		t.Logf("========================================== TOTAL Messages: %v", total)
+	})
+}
